@@ -1,0 +1,23 @@
+# No source code in this repository - it's an umbrella/landing page repo
+# Only documentation and meta files are tracked
+
+# Ignore all source directories
+lemonc/
+vscode-lemon/
+
+# Ignore build artifacts
+*.exe
+*.o
+*.obj
+*.lmb
+*.vsix
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
