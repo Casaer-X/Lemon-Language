@@ -58,7 +58,7 @@ Create `hello.lm`:
 ```lemon
 package main;
 
-public class App {
+public class HelloLemon {
     public static void main(String[] args) {
         printf("Hello, World!\n");
     }
