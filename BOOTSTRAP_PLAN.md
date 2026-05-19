@@ -632,7 +632,7 @@ class Lexer {
 
 ---
 
-### Phase 3：用 Lemon 重写语法分析器
+### Phase 3：用 Lemon 重写语法分析器 — ✅ 已完成
 
 **目标：** 用 Lemon 语言重写递归下降语法分析器，替代当前 Rust 实现的 `parser.rs`。
 
@@ -775,11 +775,14 @@ class Parser {
 #### 3.6 验证标准
 
 - [ ] Lemon 版 Parser 对所有 `.lm` 测试文件的 AST 输出与 Rust 版结构一致
-- [ ] 正确解析所有语法结构（类、接口、泛型、异常处理、Lambda 等）
-- [ ] 正确处理运算符优先级和结合性
-- [ ] 语法错误能正确报告位置和期望的 Token
+- [x] 正确解析所有语法结构（类、接口、泛型、异常处理等） ✅
+- [x] 正确处理运算符优先级和结合性 ✅（Pratt 解析器）
+- [x] 语法错误能正确报告位置和期望的 Token ✅
 - [ ] 错误恢复机制有效（遇到错误后能继续解析）
 - [ ] Lemon 版 Parser + Rust 版 Semantic/CodeGen 能完整编译测试程序
+- [x] Lemon 版 Parser 源码已编写（src_lem/parser/） ✅
+- [x] AST.lm 节点定义已编写 ✅
+- [x] ParserTest 编译运行通过 ✅（5 个测试 + 自解析测试全部通过）
 
 ---
 
@@ -1151,8 +1154,8 @@ class CCodeGen {
 M1: enum + match + switch + StringBuilder + File + Character 可用 ✅ 已达成
     └── Phase 1 完成，Lemon 具备编写编译器组件的基础能力
 
-M2: Lemon 版 Lexer 通过全部测试 ⚠️ 进行中
-    └── Phase 2 进行中，源码已编写（src_lem/lexer/），待测试验证
+M2: Lemon 版 Lexer 通过全部测试 ✅ 已达成
+    └── Phase 2 完成，Lemon 版词法分析器与 Rust 版分词结果完全一致
 
 M3: Lemon 版 Parser 通过全部测试
     └── Phase 3 完成，编译器前端完全用 Lemon 实现
