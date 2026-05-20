@@ -4,6 +4,38 @@ All notable changes to the Language Lemon project will be documented in this fil
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.3.0] - 2026-05-19
+
+### Bootstrap Milestone: Lemon Lexer & Parser Self-Hosted
+
+Language Lemon can now rewrite its own compiler frontend in Lemon. This is a critical milestone for the self-bootstrapping plan.
+
+#### Lemon Lexer (src_lem/lexer/)
+- Complete rewrite of the lexer in Lemon language (5 files)
+- Token output matches Rust version for all .lm files (differs only by EOF token)
+- Self-lex test passes for all 5 lexer source files
+
+#### Lemon Parser (src_lem/parser/)
+- Complete rewrite of the parser in Lemon language (3 files, ~2900 lines)
+- Recursive descent parser with Pratt expression parsing
+- 46 AST node declarations, 61 declarations parsed correctly across 8 .lm files
+- Self-parse test passes for all 8 .lm files
+
+#### Compiler Fixes
+- Fix `File_readAll` name conflict (static vs instance method)
+- Fix `Array`/`Map` static method code generation
+- Add field type inference in `infer_class_from_expr`
+- Add `String.join` and `Array.push` builtin methods
+- Fix optimizer loop variable constant propagation
+- Add `\0` escape sequence support in lexer
+
+#### VS Code Extension Fixes
+- Remove false-positive semantic checks (bare method calls, undefined variables, redeclarations)
+- Fix string escape handling (consecutive backslash counting)
+- Add builtin class completions (System, Array, Map, String, File, Character)
+- Add `System.`, `Array.`, `Map.` member completions
+- Expand String method completions
+
 ## [1.0.0] - 2026-05-12
 
 ### First Official Release
