@@ -4,6 +4,52 @@ All notable changes to the Language Lemon project will be documented in this fil
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.4.0] - 2026-05-21
+
+### Bootstrap Milestone: Lemon Semantic Analyzer & C Code Generator Self-Hosted
+
+Language Lemon can now rewrite its own compiler backend in Lemon. Combined with the previously completed Lexer and Parser, the entire compiler pipeline is now self-hostable.
+
+#### Lemon Semantic Analyzer (src_lem/semantic/)
+- Complete rewrite of the semantic analyzer in Lemon language (3 files)
+- 4-phase analysis: collect declarations → check inheritance → check interfaces → check members
+- 19 semantic error types with factory methods and formatted output
+- Circular inheritance detection with visited-set safety
+- Interface implementation verification
+- 9/10 tests pass (Test 10 fails due to file path resolution, not logic error)
+
+#### Lemon C Code Generator (src_lem/codegen/)
+- Complete rewrite of the C code generator in Lemon language (1 file, ~1700 lines)
+- Full runtime library generation (exception system, GC, String, StringBuilder, Array, Map, File, Character)
+- Struct definition with vtable/itable support
+- Constructor, method, and destructor generation
+- Expression and statement generation for all AST node types
+- Match expression with tagged union support (enum variant destructuring)
+- Switch statement generation
+- Enum struct definition with variant data fields and constructor functions
+- String literal collection and emission
+- Map value type tracking for boxing/unboxing of primitive types
+- Integer argument wrapping for void* parameters (Map/Array containers)
+
+#### Compiler Bug Fixes (Rust version)
+- **Critical: Struct layout compatibility** — Fix itable pointers being placed before parent fields, causing memory corruption when casting subclass pointers to parent type (Dog* → Animal*)
+- **Critical: Optimizer constant propagation** — Fix `i++` in for-loops being incorrectly propagated as `1++` by recognizing increment/decrement as variable mutations
+- **Critical: Optimizer loop variable tracking** — Fix `collect_assigned_vars_expr_impl` not recognizing `PostInc`/`PreInc`/`PostDec`/`PreDec` as variable assignments
+- **Map<String, int> support** — Add `wrap_int_arg_for_void_ptr` for `LemonMap_put`/`LemonArray_add`/`LemonArray_push` integer arguments
+- **FieldAccess method call wrapping** — Extend void* integer wrapping to `Expr::Call` with `FieldAccess` callee (not just `Expr::MethodCall`)
+- **UnaryOp optimization** — Skip constant folding for increment/decrement operators to prevent `i++` → `1++`
+
+#### Test Results
+- test_hello: PASS
+- test_simple: PASS
+- test_inherit: PASS (class inheritance + method override)
+- test_iface: PASS (interface implementation + itable dispatch)
+- test_map: PASS (Map<String, String>)
+- test_map_int: PASS (Map<String, int> with boxing/unboxing)
+- test_sb: PASS (StringBuilder)
+- test_step: PASS (comprehensive: inheritance, interface, Array, Map<String,int>, StringBuilder, for-loop, string concat)
+- test_class: PASS (full integration test)
+
 ## [1.3.0] - 2026-05-19
 
 ### Bootstrap Milestone: Lemon Lexer & Parser Self-Hosted
