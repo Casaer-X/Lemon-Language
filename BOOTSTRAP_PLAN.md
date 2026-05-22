@@ -1112,11 +1112,28 @@ class CCodeGen {
 
 #### 6.4 验证标准
 
-- [ ] 三阶段自举成功，T1 和 T2 产物二进制一致
-- [ ] Lemon 版编译器能编译自身
+- [x] T0→T1 自举成功：Rust 版 lemonc 编译 src_lem 生成 lemonc_lem.exe ✅
+- [x] T1 功能验证：lemonc_lem.exe 能正确编译 test_hello/test_simple/test_map_int/test_sb/test_ge ✅
+- [ ] T1→T2 自举成功：lemonc_lem.exe 编译 src_lem 生成的 C 代码能通过 gcc 编译（⚠️ 部分成功，有类型推断问题）
+- [ ] T1 和 T2 产物二进制一致（固定点验证）
 - [ ] Lemon 版编译器能编译所有现有测试程序
 - [ ] 编译速度在 Rust 版的 5 倍以内
 - [ ] 无内存泄漏（通过 Valgrind/ASan 验证）
+
+#### 6.5 当前进展（2026-05-22）
+
+**已完成：**
+- `--build` 模式改为合并编译：所有源文件合并为一个 Program 后统一编译，解决了跨文件类型引用问题
+- `??` (null 合并) 运算符支持：Lexer/AST/Parser/CCodeGen 全链路实现
+- 语义分析器增强：enum 变体访问、`UndefinedVariant` 错误类型
+- Lemon 版 CCodeGen `opToString`/`unaryOpToString` 编码 bug 修复
+- 字符串字面量收集和发射
+- T0→T1 自举完全成功，T1 通过所有基础测试
+
+**T2 已知问题：**
+- 字符串 `+` 未翻译为 `String_concat`：Lemon 版 CCodeGen 的 `exprIsStringType` 在自举场景下类型推断失败
+- 空字符常量 `''`：char 字面量翻译问题
+- `LemonArray_size`/`LemonArray_get` 名称损坏：类型推断错误导致函数名生成错误
 
 ---
 

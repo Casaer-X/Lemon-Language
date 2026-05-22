@@ -4,6 +4,46 @@ All notable changes to the Language Lemon project will be documented in this fil
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.5.0] - 2026-05-22
+
+### Bootstrap Milestone: Phase 6 — Self-Hosting Build System & Partial T0→T1→T2 Bootstrap
+
+The Lemon compiler can now build itself via `lemonc --build`, merging all source files into a single compilation unit. The T0→T1 bootstrap (Rust→Lemon) is fully functional, with T1 passing all basic test suites.
+
+#### `--build` Multi-File Compilation
+- **Merged compilation mode**: `--build` now merges all source files into a single Program before semantic analysis, instead of compiling each file independently
+- **Test file detection**: Files containing "Test" in their path are automatically classified as test files and compiled separately
+- **String literal emission**: String literals collected during code generation are now properly emitted in the merged C output
+
+#### Null Coalesce Operator (`??`)
+- **Lexer**: `??` tokenized as `TokenKind::NullCoalesce` (both Rust and Lemon versions)
+- **AST**: `BinaryOp::NullCoalesce` variant added
+- **Parser**: `??` parsed with precedence 1 (same as ternary `? :`)
+- **CCodeGen**: `a ?? b` translates to `((a) != NULL ? (a) : (b))`
+
+#### Semantic Analyzer Improvements
+- **Enum variant access**: `EnumName.VariantName` field access and constructor calls are now recognized
+- **`UndefinedVariant` error type**: New semantic error for undefined enum variants
+- **`is_enum_type` / `enum_has_variant`**: Helper methods for enum type checking
+
+#### Lemon CCodeGen Bug Fixes
+- **`opToString` encoding fix**: Changed from hardcoded integer offsets to `BinaryOp` constants, fixing all binary operators being rendered as `??`
+- **`unaryOpToString` encoding fix**: Same fix applied using `UnaryOp` constants
+- **Null coalesce in Lemon CCodeGen**: `??` operator now generates correct C ternary expression
+
+#### Bootstrap Verification Results
+| Stage | Status | Description |
+|-------|--------|-------------|
+| T0 (Rust lemonc) | ✅ | Bootstrap compiler |
+| T0 → T1 | ✅ | Rust compiles src_lem → lemonc_lem.exe |
+| T1 tests | ✅ | test_hello, test_simple, test_map_int, test_sb, test_ge all pass |
+| T1 → T2 | ⚠️ | C code generation succeeds, but gcc compilation has errors (string `+` type inference, char literal) |
+
+#### Known T2 Issues
+- String `+` not translated to `String_concat` when type inference fails in self-hosted CCodeGen
+- Empty character constant `''` in generated C code
+- `LemonArray_size`/`LemonArray_get` name corruption due to type inference errors
+
 ## [1.4.0] - 2026-05-21
 
 ### Bootstrap Milestone: Lemon Semantic Analyzer & C Code Generator Self-Hosted
