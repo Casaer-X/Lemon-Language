@@ -11,6 +11,15 @@ vscode-lemon/
 *.obj
 *.lmb
 *.vsix
+*.c
+*.asm
+*.out
+*.log
+
+# Ignore debug/temp files
+debug.gdb
+*_err.txt
+*_out.txt
 
 # Ignore IDE files
 .vscode/
