@@ -4,6 +4,18 @@ All notable changes to the Language Lemon project will be documented in this fil
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.2.0] - 2026-05-23
+
+### Hybrid AOT+JIT Compilation + Runtime Library
+
+`--target hybrid` generates native code with embedded bytecode, 17 runtime functions (Array/String/IO/VM interop), and VM initialization API for AOT↔JIT interop. See [v2.2.0 changelog](changelogs/v2.2.0.md) for details.
+
+## [2.1.0] - 2026-05-23
+
+### NativeCodeGen Completion — Break/Continue/Switch/Float/NullCoalesce/ArrayAccess/UnaryOps
+
+Major NativeCodeGen improvements: Break/Continue with loop label tracking, Switch statement, FloatLiteral with SSE2, NullCoalesce short-circuit, ArrayAccess, Sizeof type-aware, and full unary operator support (PreInc/PreDec/PostInc/PostDec). See [v2.1.0 changelog](changelogs/v2.1.0.md) for details.
+
 ## [2.0.0] - 2026-05-23
 
 ### JIT Compiler + Hot-Spot Optimization
