@@ -4,6 +4,12 @@ All notable changes to the Language Lemon project will be documented in this fil
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.8.0] - 2026-05-23
+
+### Embedded VM Runtime — AOT+JIT Hybrid Execution Foundation
+
+Refactored the Lemon VM into an embeddable library (LeVM) with C FFI interface, added CallNative bytecode instruction for native↔VM interop, and implemented embedded .lmb data section support in the PE linker. See [v1.8.0 changelog](changelogs/v1.8.0.md) for details.
+
 ## [1.5.0] - 2026-05-22
 
 ### Bootstrap Milestone: Phase 6 — Self-Hosting Build System & Partial T0→T1→T2 Bootstrap
@@ -39,10 +45,10 @@ The Lemon compiler can now build itself via `lemonc --build`, merging all source
 | T1 tests | ✅ | test_hello, test_simple, test_map_int, test_sb, test_ge all pass |
 | T1 → T2 | ⚠️ | C code generation succeeds, but gcc compilation has errors (string `+` type inference, char literal) |
 
-#### Known T2 Issues
-- String `+` not translated to `String_concat` when type inference fails in self-hosted CCodeGen
-- Empty character constant `''` in generated C code
-- `LemonArray_size`/`LemonArray_get` name corruption due to type inference errors
+#### Known T2 Issues (all fixed in v1.6.0)
+- ~~String `+` not translated to `String_concat` when type inference fails in self-hosted CCodeGen~~ → Fixed by `toStringExpr` const char* handling
+- ~~Empty character constant `''` in generated C code~~ → Fixed
+- ~~`LemonArray_size`/`LemonArray_get` name corruption due to type inference errors~~ → Fixed by `inferClassFromExpr` FieldAccess priority
 
 ## [1.4.0] - 2026-05-21
 
