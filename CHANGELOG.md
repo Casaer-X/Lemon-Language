@@ -4,6 +4,18 @@ All notable changes to the Language Lemon project will be documented in this fil
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.0.0] - 2026-05-23
+
+### JIT Compiler + Hot-Spot Optimization
+
+Complete JIT compilation pipeline: 50+ bytecode→x86-64 machine code instructions, Windows x64 calling convention, hot-spot detection with automatic JIT triggering. See [v2.0.0 changelog](changelogs/v2.0.0.md) for details.
+
+## [1.9.0] - 2026-05-23
+
+### JIT Pathway Complete — Bytecode Compiler + New Instructions + Execution Strategy
+
+Completed the JIT execution pathway: all 14 bytecode compiler TODOs implemented, 18 new bytecode instructions added (Map/String/Float/optimized ops), and execution strategy decision module created for AOT+JIT hybrid compilation. See [v1.9.0 changelog](changelogs/v1.9.0.md) for details.
+
 ## [1.8.0] - 2026-05-23
 
 ### Embedded VM Runtime — AOT+JIT Hybrid Execution Foundation
