@@ -32,6 +32,24 @@ class Reg {
     public static int R14 = 14;
     public static int R15 = 15;
 
+    // XMM 寄存器 (SSE/SSE2)
+    public static int XMM0 = 0;
+    public static int XMM1 = 1;
+    public static int XMM2 = 2;
+    public static int XMM3 = 3;
+    public static int XMM4 = 4;
+    public static int XMM5 = 5;
+    public static int XMM6 = 6;
+    public static int XMM7 = 7;
+    public static int XMM8 = 8;
+    public static int XMM9 = 9;
+    public static int XMM10 = 10;
+    public static int XMM11 = 11;
+    public static int XMM12 = 12;
+    public static int XMM13 = 13;
+    public static int XMM14 = 14;
+    public static int XMM15 = 15;
+
     public static bool isExtended(int reg) {
         return reg >= 8;
     }
@@ -494,6 +512,333 @@ class X8664 {
     // ADD RSP, imm32
     public void emitAddRsp(int imm32) {
         this.emitAddRegImm32(Reg.RSP, imm32);
+    }
+
+    // ---- SSE/SSE2 浮点指令 ----
+
+    // SSE 前缀: 242=double-precision(sd), 243=single-precision(ss), 102=packed
+
+    // MOVQ xmm, r64 (GPR -> XMM, 64-bit)
+    public void emitMovqXmmFromReg(int xmm, int reg) {
+        this.emitByte(102);
+        this.emitRex(true, reg, xmm);
+        this.emitByte(15);
+        this.emitByte(110);
+        this.emitModRM(3, xmm, reg);
+    }
+
+    // MOVQ r64, xmm (XMM -> GPR, 64-bit)
+    public void emitMovqRegFromXmm(int reg, int xmm) {
+        this.emitByte(102);
+        this.emitRex(true, xmm, reg);
+        this.emitByte(15);
+        this.emitByte(126);
+        this.emitModRM(3, xmm, reg);
+    }
+
+    // MOVSD xmm1, xmm2 (double move between XMM registers)
+    public void emitMovsdXmmXmm(int dst, int src) {
+        this.emitByte(242);
+        this.emitRex(false, dst, src);
+        this.emitByte(15);
+        this.emitByte(16);
+        this.emitModRM(3, dst, src);
+    }
+
+    // MOVSD xmm, [reg+offset] (load double from memory)
+    public void emitMovsdXmmMem(int xmm, int base, int offset) {
+        this.emitByte(242);
+        this.emitRex(false, xmm, base);
+        this.emitByte(15);
+        this.emitByte(16);
+        if (offset == 0 && Reg.encode(base) != 5) {
+            this.emitModRM(0, xmm, base);
+        } else if (offset >= -128 && offset <= 127) {
+            this.emitModRM(1, xmm, base);
+            this.emitByte(offset);
+        } else {
+            this.emitModRM(2, xmm, base);
+            this.emitDWord(offset);
+        }
+    }
+
+    // MOVSD [reg+offset], xmm (store double to memory)
+    public void emitMovsdMemXmm(int base, int offset, int xmm) {
+        this.emitByte(242);
+        this.emitRex(false, xmm, base);
+        this.emitByte(15);
+        this.emitByte(17);
+        if (offset == 0 && Reg.encode(base) != 5) {
+            this.emitModRM(0, xmm, base);
+        } else if (offset >= -128 && offset <= 127) {
+            this.emitModRM(1, xmm, base);
+            this.emitByte(offset);
+        } else {
+            this.emitModRM(2, xmm, base);
+            this.emitDWord(offset);
+        }
+    }
+
+    // MOVSS xmm1, xmm2 (float move between XMM registers)
+    public void emitMovssXmmXmm(int dst, int src) {
+        this.emitByte(243);
+        this.emitRex(false, dst, src);
+        this.emitByte(15);
+        this.emitByte(16);
+        this.emitModRM(3, dst, src);
+    }
+
+    // MOVSS xmm, [reg+offset] (load float from memory)
+    public void emitMovssXmmMem(int xmm, int base, int offset) {
+        this.emitByte(243);
+        this.emitRex(false, xmm, base);
+        this.emitByte(15);
+        this.emitByte(16);
+        if (offset == 0 && Reg.encode(base) != 5) {
+            this.emitModRM(0, xmm, base);
+        } else if (offset >= -128 && offset <= 127) {
+            this.emitModRM(1, xmm, base);
+            this.emitByte(offset);
+        } else {
+            this.emitModRM(2, xmm, base);
+            this.emitDWord(offset);
+        }
+    }
+
+    // MOVSS [reg+offset], xmm (store float to memory)
+    public void emitMovssMemXmm(int base, int offset, int xmm) {
+        this.emitByte(243);
+        this.emitRex(false, xmm, base);
+        this.emitByte(15);
+        this.emitByte(17);
+        if (offset == 0 && Reg.encode(base) != 5) {
+            this.emitModRM(0, xmm, base);
+        } else if (offset >= -128 && offset <= 127) {
+            this.emitModRM(1, xmm, base);
+            this.emitByte(offset);
+        } else {
+            this.emitModRM(2, xmm, base);
+            this.emitDWord(offset);
+        }
+    }
+
+    // ---- SSE2 double-precision 运算 ----
+
+    // ADDSD xmm1, xmm2
+    public void emitAddsdXmmXmm(int dst, int src) {
+        this.emitByte(242);
+        this.emitRex(false, dst, src);
+        this.emitByte(15);
+        this.emitByte(88);
+        this.emitModRM(3, dst, src);
+    }
+
+    // ADDSD xmm, [reg+offset]
+    public void emitAddsdXmmMem(int xmm, int base, int offset) {
+        this.emitByte(242);
+        this.emitRex(false, xmm, base);
+        this.emitByte(15);
+        this.emitByte(88);
+        if (offset == 0 && Reg.encode(base) != 5) {
+            this.emitModRM(0, xmm, base);
+        } else if (offset >= -128 && offset <= 127) {
+            this.emitModRM(1, xmm, base);
+            this.emitByte(offset);
+        } else {
+            this.emitModRM(2, xmm, base);
+            this.emitDWord(offset);
+        }
+    }
+
+    // SUBSD xmm1, xmm2
+    public void emitSubsdXmmXmm(int dst, int src) {
+        this.emitByte(242);
+        this.emitRex(false, dst, src);
+        this.emitByte(15);
+        this.emitByte(92);
+        this.emitModRM(3, dst, src);
+    }
+
+    // MULSD xmm1, xmm2
+    public void emitMulsdXmmXmm(int dst, int src) {
+        this.emitByte(242);
+        this.emitRex(false, dst, src);
+        this.emitByte(15);
+        this.emitByte(89);
+        this.emitModRM(3, dst, src);
+    }
+
+    // DIVSD xmm1, xmm2
+    public void emitDivsdXmmXmm(int dst, int src) {
+        this.emitByte(242);
+        this.emitRex(false, dst, src);
+        this.emitByte(15);
+        this.emitByte(94);
+        this.emitModRM(3, dst, src);
+    }
+
+    // ---- SSE2 比较指令 ----
+
+    // COMISD xmm1, xmm2 (ordered compare, sets EFLAGS: ZF, PF, CF)
+    public void emitComisdXmmXmm(int xmm1, int xmm2) {
+        this.emitByte(102);
+        this.emitRex(false, xmm1, xmm2);
+        this.emitByte(15);
+        this.emitByte(47);
+        this.emitModRM(3, xmm1, xmm2);
+    }
+
+    // UCOMISD xmm1, xmm2 (unordered compare, sets EFLAGS)
+    public void emitUcomisdXmmXmm(int xmm1, int xmm2) {
+        this.emitByte(102);
+        this.emitRex(false, xmm1, xmm2);
+        this.emitByte(15);
+        this.emitByte(46);
+        this.emitModRM(3, xmm1, xmm2);
+    }
+
+    // ---- SSE/SSE2 类型转换 ----
+
+    // CVTSI2SD xmm, r64 (signed int64 to double)
+    public void emitCvtsi2sdXmmReg(int xmm, int reg) {
+        this.emitByte(242);
+        this.emitRex(true, xmm, reg);
+        this.emitByte(15);
+        this.emitByte(42);
+        this.emitModRM(3, xmm, reg);
+    }
+
+    // CVTTSD2SI r64, xmm (double with truncation to signed int64)
+    public void emitCvttsd2siRegXmm(int reg, int xmm) {
+        this.emitByte(242);
+        this.emitRex(true, reg, xmm);
+        this.emitByte(15);
+        this.emitByte(44);
+        this.emitModRM(3, reg, xmm);
+    }
+
+    // ---- SSE single-precision 运算 ----
+
+    // ADDSS xmm1, xmm2
+    public void emitAddssXmmXmm(int dst, int src) {
+        this.emitByte(243);
+        this.emitRex(false, dst, src);
+        this.emitByte(15);
+        this.emitByte(88);
+        this.emitModRM(3, dst, src);
+    }
+
+    // SUBSS xmm1, xmm2
+    public void emitSubssXmmXmm(int dst, int src) {
+        this.emitByte(243);
+        this.emitRex(false, dst, src);
+        this.emitByte(15);
+        this.emitByte(92);
+        this.emitModRM(3, dst, src);
+    }
+
+    // MULSS xmm1, xmm2
+    public void emitMulssXmmXmm(int dst, int src) {
+        this.emitByte(243);
+        this.emitRex(false, dst, src);
+        this.emitByte(15);
+        this.emitByte(89);
+        this.emitModRM(3, dst, src);
+    }
+
+    // DIVSS xmm1, xmm2
+    public void emitDivssXmmXmm(int dst, int src) {
+        this.emitByte(243);
+        this.emitRex(false, dst, src);
+        this.emitByte(15);
+        this.emitByte(94);
+        this.emitModRM(3, dst, src);
+    }
+
+    // ---- SSE/SSE2 双精度与单精度转换 ----
+
+    // CVTSS2SD xmm1, xmm2 (single to double)
+    public void emitCvtss2sdXmmXmm(int dst, int src) {
+        this.emitByte(243);
+        this.emitRex(false, dst, src);
+        this.emitByte(15);
+        this.emitByte(90);
+        this.emitModRM(3, dst, src);
+    }
+
+    // CVTSD2SS xmm1, xmm2 (double to single)
+    public void emitCvtsd2ssXmmXmm(int dst, int src) {
+        this.emitByte(242);
+        this.emitRex(false, dst, src);
+        this.emitByte(15);
+        this.emitByte(90);
+        this.emitModRM(3, dst, src);
+    }
+
+    // ---- XMM 寄存器栈保存/恢复 (Windows x64 调用约定) ----
+
+    // MOVSD [RSP+offset], xmm (保存 XMM 到栈)
+    public void emitMovsdStackSave(int xmm, int offset) {
+        this.emitByte(242);
+        if (Reg.isExtended(xmm)) {
+            this.emitByte(68);
+        } else {
+            this.emitByte(15);
+            this.emitByte(17);
+            if (offset >= -128 && offset <= 127) {
+                this.emitModRM(1, xmm, Reg.RSP);
+                this.emitByte(offset);
+            } else {
+                this.emitModRM(2, xmm, Reg.RSP);
+                this.emitDWord(offset);
+            }
+            return;
+        }
+        this.emitByte(15);
+        this.emitByte(17);
+        if (offset >= -128 && offset <= 127) {
+            this.emitModRM(1, xmm, Reg.RSP);
+            this.emitByte(offset);
+        } else {
+            this.emitModRM(2, xmm, Reg.RSP);
+            this.emitDWord(offset);
+        }
+    }
+
+    // MOVSD xmm, [RSP+offset] (从栈恢复 XMM)
+    public void emitMovsdStackLoad(int xmm, int offset) {
+        this.emitByte(242);
+        if (Reg.isExtended(xmm)) {
+            this.emitByte(68);
+        } else {
+            this.emitByte(15);
+            this.emitByte(16);
+            if (offset >= -128 && offset <= 127) {
+                this.emitModRM(1, xmm, Reg.RSP);
+                this.emitByte(offset);
+            } else {
+                this.emitModRM(2, xmm, Reg.RSP);
+                this.emitDWord(offset);
+            }
+            return;
+        }
+        this.emitByte(15);
+        this.emitByte(16);
+        if (offset >= -128 && offset <= 127) {
+            this.emitModRM(1, xmm, Reg.RSP);
+            this.emitByte(offset);
+        } else {
+            this.emitModRM(2, xmm, Reg.RSP);
+            this.emitDWord(offset);
+        }
+    }
+
+    // XORPS xmm1, xmm2 (clear XMM register)
+    public void emitXorpsXmmXmm(int dst, int src) {
+        this.emitByte(15);
+        this.emitRex(false, dst, src);
+        this.emitByte(87);
+        this.emitModRM(3, dst, src);
     }
 
     // ---- NOP ----

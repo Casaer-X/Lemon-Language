@@ -42,7 +42,7 @@
 
 | # | 任务 | 模块 | 说明 |
 |---|------|------|------|
-| P1-1 | X8664 SSE2 浮点指令编码 | `codegen/X8664.lm` | 添加 addsd/subsd/mulsd/divsd/comisd/cvtsi2sd 等浮点指令编码 |
+| P1-1 | X8664 SSE2 浮点指令编码 | `codegen/X8664.lm` | ✅ 已完成 — 添加 25+ SSE2 指令: MOVQ/MOVSD/MOVSS, ADDSD/SUBSD/MULSD/DIVSD, ADDSS/SUBSS/MULSS/DIVSS, COMISD/UCOMISD, CVTSI2SD/CVTTSD2SI, CVTSS2SD/CVTSD2SS, XMM 栈保存/恢复 |
 | P1-2 | NativeCodeGen 浮点运算支持 | `codegen/NativeCodeGen.lm` | 接入 SSE2 指令，处理 float/double 类型 |
 | P1-3 | NativeCodeGen 数组/Map 操作 | `codegen/NativeCodeGen.lm` | ArrayAccess、Map 操作的机器码生成 |
 | P1-4 | COFF64 验证和完善 | `codegen/COFF64.lm` | 验证段生成、符号表、重定位 |
