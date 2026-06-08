@@ -893,13 +893,21 @@ class NasmCodeGen {
             this.emitLine("    mov [rbp-24], rax  ; args array");
 
             // 填充 args 数组
+            this.emitLine("    mov dword [rbp-32], 0  ; i = 0");
             int loopLabel = this.freshLabel();
             this.textSection.append(".args_loop_" + loopLabel + ":\n");
-            this.emitLine("    mov rcx, [rbp-8]  ; argc");
-            this.emitLine("    cmp dword [rbp-32], 0");
+            this.emitLine("    mov eax, [rbp-32]  ; i");
+            this.emitLine("    cmp eax, [rbp-8]   ; i vs argc");
             this.emitLine("    jge .args_end_" + loopLabel);
-
-            // TODO: 完整的 args 填充
+            // LemonArray_add(args, argv[i])
+            this.emitLine("    mov rcx, [rbp-24]  ; args array");
+            this.emitLine("    mov rdx, [rbp-16]  ; argv");
+            this.emitLine("    mov eax, [rbp-32]  ; i");
+            this.emitLine("    mov rdx, [rdx + rax*8]  ; argv[i]");
+            this.emitCall("LemonArray_add");
+            // i++
+            this.emitLine("    inc dword [rbp-32]");
+            this.emitLine("    jmp .args_loop_" + loopLabel);
 
             this.textSection.append(".args_end_" + loopLabel + ":\n");
 

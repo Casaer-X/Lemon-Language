@@ -425,15 +425,21 @@ class X8664 {
         this.emitModRM(3, dst, src);
     }
 
-    // 条件码
-    public static int CC_E  = 0;  // equal/zero
-    public static int CC_NE = 1;  // not equal/not zero
+    // 条件码 (x86 Jcc/SETcc 编码)
+    public static int CC_O  = 0;  // overflow
+    public static int CC_NO = 1;  // not overflow
+    public static int CC_B  = 2;  // below / carry (unsigned)
+    public static int CC_AE = 3;  // above or equal / not carry (unsigned)
+    public static int CC_E  = 4;  // equal / zero
+    public static int CC_NE = 5;  // not equal / not zero
+    public static int CC_BE = 6;  // below or equal (unsigned, CF=1 or ZF=1)
+    public static int CC_A  = 7;  // above (unsigned, CF=0 and ZF=0)
+    public static int CC_P  = 10; // parity even (PF=1)
+    public static int CC_NP = 11; // not parity (PF=0)
     public static int CC_L  = 12; // less (signed)
     public static int CC_GE = 13; // greater or equal (signed)
     public static int CC_LE = 14; // less or equal (signed)
     public static int CC_G  = 15; // greater (signed)
-    public static int CC_B  = 2;  // below (unsigned)
-    public static int CC_AE = 3;  // above or equal (unsigned)
 
     // ---- 跳转指令 ----
 

@@ -74,6 +74,7 @@ class NativeCodeGen {
     private NativeFunction currentFunc;
     private String currentClass;
     private Map<String, int> varStackOffsets;
+    private Map<String, String> varStackTypes;
     private int stackOffset;
     private Map<String, int> classFieldOffsets;
     private Map<String, int> classSizes;
@@ -86,10 +87,48 @@ class NativeCodeGen {
         this.currentFunc = null;
         this.currentClass = null;
         this.varStackOffsets = new Map<String, int>();
+        this.varStackTypes = new Map<String, String>();
         this.stackOffset = 0;
         this.classFieldOffsets = new Map<String, int>();
         this.classSizes = new Map<String, int>();
         this.stringCounter = 0;
+    }
+
+    // ---- 类型辅助 ----
+
+    private String getPrimitiveTypeName(int primitiveKind) {
+        if (primitiveKind == PrimitiveType.Float) return "float";
+        if (primitiveKind == PrimitiveType.Double) return "double";
+        return "int";
+    }
+
+    private bool isFloatType(String typeName) {
+        return typeName != null && (typeName.equals("float") || typeName.equals("double"));
+    }
+
+    private String getExprType(Expr expr) {
+        if (expr.kind == ExprKind.FloatLiteral) return "double";
+        if (expr.kind == ExprKind.IntegerLiteral) return "int";
+        if (expr.kind == ExprKind.BoolLiteral) return "int";
+        if (expr.kind == ExprKind.Variable) {
+            if (this.varStackTypes.containsKey(expr.strValue)) {
+                return this.varStackTypes.get(expr.strValue);
+            }
+        }
+        // 默认推断: BinaryOp 取左右类型中更"宽"的
+        if (expr.kind == ExprKind.BinaryOp) {
+            String leftType = this.getExprType(expr.left);
+            String rightType = this.getExprType(expr.right);
+            if (leftType.equals("double") || rightType.equals("double")) return "double";
+            if (leftType.equals("float") || rightType.equals("float")) return "float";
+            return "int";
+        }
+        // 对于 UnaryOp / Cast 等，取操作数类型
+        if (expr.operand != null) {
+            return this.getExprType(expr.operand);
+        }
+        // 方法调用等返回整数类型
+        return "int";
     }
 
     // ---- 主入口 ----
@@ -246,7 +285,9 @@ class NativeCodeGen {
         this.startFunction(funcName, paramCount);
 
         this.varStackOffsets = new Map<String, int>();
+        this.varStackTypes = new Map<String, String>();
         this.varStackOffsets.put("self", -8);
+        this.varStackTypes.put("self", "int");
         this.stackOffset = -16;
         // self 在 RCX
         this.encoder.emitMovMemReg(Reg.RBP, -8, Reg.RCX);
@@ -256,6 +297,12 @@ class NativeCodeGen {
             for (int pi = 0; pi < method.params.size(); pi++) {
                 Param param = method.params.get(pi);
                 this.varStackOffsets.put(param.name, this.stackOffset);
+                // 记录参数类型
+                if (param.paramType != null && param.paramType.primitiveKind != PrimitiveType.Void) {
+                    this.varStackTypes.put(param.name, this.getPrimitiveTypeName(param.paramType.primitiveKind));
+                } else {
+                    this.varStackTypes.put(param.name, "int");
+                }
                 this.saveArgToStack(pi, this.stackOffset);
                 this.stackOffset = this.stackOffset - 8;
             }
@@ -277,12 +324,19 @@ class NativeCodeGen {
         this.startFunction(func.name, paramCount);
 
         this.varStackOffsets = new Map<String, int>();
+        this.varStackTypes = new Map<String, String>();
         this.stackOffset = -8;
 
         if (func.params != null) {
             for (int pi = 0; pi < func.params.size(); pi++) {
                 Param param = func.params.get(pi);
                 this.varStackOffsets.put(param.name, this.stackOffset);
+                // 记录参数类型
+                if (param.paramType != null && param.paramType.primitiveKind != PrimitiveType.Void) {
+                    this.varStackTypes.put(param.name, this.getPrimitiveTypeName(param.paramType.primitiveKind));
+                } else {
+                    this.varStackTypes.put(param.name, "int");
+                }
                 this.saveArgToStack(pi, this.stackOffset);
                 this.stackOffset = this.stackOffset - 8;
             }
@@ -388,10 +442,25 @@ class NativeCodeGen {
     private void compileVarDecl(VarDecl varDecl) {
         int off = this.stackOffset;
         this.varStackOffsets.put(varDecl.name, off);
+        // 记录变量类型
+        if (varDecl.varType != null && varDecl.varType.primitiveKind != PrimitiveType.Void) {
+            this.varStackTypes.put(varDecl.name, this.getPrimitiveTypeName(varDecl.varType.primitiveKind));
+        } else {
+            this.varStackTypes.put(varDecl.name, "int");
+        }
         this.stackOffset = this.stackOffset - 8;
         if (varDecl.initializer != null) {
             this.compileExprToReg(varDecl.initializer, Reg.RAX);
-            this.encoder.emitMovMemReg(Reg.RBP, off, Reg.RAX);
+            String varType = "int";
+            if (this.varStackTypes.containsKey(varDecl.name)) {
+                varType = this.varStackTypes.get(varDecl.name);
+            }
+            if (varType.equals("double") || varType.equals("float")) {
+                this.encoder.emitMovqXmmFromReg(Reg.XMM0, Reg.RAX);
+                this.encoder.emitMovsdMemXmm(Reg.RBP, off, Reg.XMM0);
+            } else {
+                this.encoder.emitMovMemReg(Reg.RBP, off, Reg.RAX);
+            }
         }
     }
 
@@ -431,6 +500,10 @@ class NativeCodeGen {
     private void compileExprToReg(Expr expr, int dst) {
         if (expr.kind == ExprKind.IntegerLiteral) {
             this.encoder.emitMovRegImm32(dst, (int)expr.longValue);
+        } else if (expr.kind == ExprKind.FloatLiteral) {
+            // 浮点字面量: 将 64-bit IEEE754 位模式加载到 GPR
+            long longBits = (long)expr.doubleValue;
+            this.encoder.emitMovRegImm64(dst, longBits);
         } else if (expr.kind == ExprKind.BoolLiteral) {
             this.encoder.emitMovRegImm32(dst, expr.boolValue ? 1 : 0);
         } else if (expr.kind == ExprKind.Null) {
@@ -447,7 +520,17 @@ class NativeCodeGen {
             if (this.varStackOffsets.containsKey(expr.strValue)) {
                 off = this.varStackOffsets.get(expr.strValue);
             }
-            this.encoder.emitMovRegMem(dst, Reg.RBP, off);
+            String varType = "int";
+            if (this.varStackTypes.containsKey(expr.strValue)) {
+                varType = this.varStackTypes.get(expr.strValue);
+            }
+            if (varType.equals("double") || varType.equals("float")) {
+                // 浮点变量: 从栈加载到 XMM，再 MOVQ 到 GPR
+                this.encoder.emitMovsdXmmMem(Reg.XMM0, Reg.RBP, off);
+                this.encoder.emitMovqRegFromXmm(dst, Reg.XMM0);
+            } else {
+                this.encoder.emitMovRegMem(dst, Reg.RBP, off);
+            }
         } else if (expr.kind == ExprKind.This) {
             this.encoder.emitMovRegMem(dst, Reg.RBP, -8);
         } else if (expr.kind == ExprKind.BinaryOp) {
@@ -498,6 +581,16 @@ class NativeCodeGen {
     }
 
     private void compileBinaryOp(Expr expr, int dst) {
+        String exprType = this.getExprType(expr);
+        bool isDouble = exprType.equals("double");
+        bool isFloat = exprType.equals("float");
+        bool isFloatOp = isDouble || isFloat;
+
+        if (isFloatOp) {
+            this.compileFloatBinaryOp(expr, dst, isDouble);
+            return;
+        }
+
         this.compileExprToReg(expr.left, Reg.RAX);
         this.encoder.emitPushReg(Reg.RAX);
         this.compileExprToReg(expr.right, Reg.RCX);
@@ -575,26 +668,182 @@ class NativeCodeGen {
         this.encoder.emitMovRegReg(dst, Reg.RAX);
     }
 
-    private void compileAssignment(Expr expr, int dst) {
-        this.compileExprToReg(expr.value, Reg.RAX);
-        if (expr.target.kind == ExprKind.Variable) {
-            int off = 0;
-            if (this.varStackOffsets.containsKey(expr.target.strValue)) {
-                off = this.varStackOffsets.get(expr.target.strValue);
+    // ---- 浮点二元运算 ----
+
+    private void compileFloatBinaryOp(Expr expr, int dst, bool isDouble) {
+        // 将左右操作数加载到 XMM 寄存器
+        int xmmLeft = Reg.XMM0;
+        int xmmRight = Reg.XMM1;
+
+        this.compileExprToXmm(expr.left, xmmLeft, isDouble);
+        this.compileExprToXmm(expr.right, xmmRight, isDouble);
+
+        int op = expr.opValue;
+        if (op == BinaryOp.Add) {
+            if (isDouble) this.encoder.emitAddsdXmmXmm(xmmLeft, xmmRight);
+            else this.encoder.emitAddssXmmXmm(xmmLeft, xmmRight);
+        } else if (op == BinaryOp.Sub) {
+            if (isDouble) this.encoder.emitSubsdXmmXmm(xmmLeft, xmmRight);
+            else this.encoder.emitSubssXmmXmm(xmmLeft, xmmRight);
+        } else if (op == BinaryOp.Mul) {
+            if (isDouble) this.encoder.emitMulsdXmmXmm(xmmLeft, xmmRight);
+            else this.encoder.emitMulssXmmXmm(xmmLeft, xmmRight);
+        } else if (op == BinaryOp.Div) {
+            if (isDouble) this.encoder.emitDivsdXmmXmm(xmmLeft, xmmRight);
+            else this.encoder.emitDivssXmmXmm(xmmLeft, xmmRight);
+        } else if (op == BinaryOp.Eq || op == BinaryOp.Ne ||
+                   op == BinaryOp.Lt || op == BinaryOp.Gt ||
+                   op == BinaryOp.Le || op == BinaryOp.Ge) {
+            // 浮点比较: COMISD/COMISS 设置 EFLAGS (ZF, PF, CF)
+            // NaN 行为: COMISD 遇 NaN 设置 ZF=PF=CF=1
+            // 有序比较: 等于 (ZF=1, PF=0)
+            // 小于 (CF=1), 大于 (ZF=0, CF=0)
+            if (isDouble) this.encoder.emitComisdXmmXmm(xmmLeft, xmmRight);
+            else this.encoder.emitComisdXmmXmm(xmmLeft, xmmRight); // COMISS 使用相同编码但前缀为 F3
+
+            int trueLabel = this.encoder.newLabel();
+            int endLabel = this.encoder.newLabel();
+            // 处理 NaN: 如果 PF=1 (NaN), 跳转到 false
+            int nanLabel = this.encoder.newLabel();
+
+            if (op == BinaryOp.Eq) {
+                // ZF=1 且 PF=0 为等于; NaN 则 PF=1
+                this.encoder.emitJccLabel(X8664.CC_P, nanLabel); // PF=1 -> NaN, goto false
+                this.encoder.emitJccLabel(X8664.CC_E, trueLabel);
+            } else if (op == BinaryOp.Ne) {
+                // ZF=0 或 PF=1 为不等
+                this.encoder.emitJccLabel(X8664.CC_P, trueLabel); // NaN -> true
+                this.encoder.emitJccLabel(X8664.CC_NE, trueLabel);
+            } else if (op == BinaryOp.Lt) {
+                // CF=1 且 ZF=0
+                this.encoder.emitJccLabel(X8664.CC_P, nanLabel); // NaN -> false
+                this.encoder.emitJccLabel(X8664.CC_B, trueLabel); // CF=1 -> true
+            } else if (op == BinaryOp.Le) {
+                // CF=1 或 ZF=1
+                this.encoder.emitJccLabel(X8664.CC_P, nanLabel); // NaN -> false
+                this.encoder.emitJccLabel(X8664.CC_BE, trueLabel); // CF=1 or ZF=1
+            } else if (op == BinaryOp.Gt) {
+                // ZF=0 且 CF=0
+                this.encoder.emitJccLabel(X8664.CC_P, nanLabel); // NaN -> false
+                this.encoder.emitJccLabel(X8664.CC_A, trueLabel); // CF=0 and ZF=0
+            } else if (op == BinaryOp.Ge) {
+                // CF=0
+                this.encoder.emitJccLabel(X8664.CC_P, nanLabel); // NaN -> false
+                this.encoder.emitJccLabel(X8664.CC_AE, trueLabel); // CF=0
             }
-            this.encoder.emitMovMemReg(Reg.RBP, off, Reg.RAX);
-        } else if (expr.target.kind == ExprKind.FieldAccess) {
-            this.compileExprToReg(expr.target.receiver, Reg.RCX);
-            int fieldOff = 0;
-            if (this.currentClass != null) {
-                String key = this.currentClass + "." + expr.target.strValue;
-                if (this.classFieldOffsets.containsKey(key)) {
-                    fieldOff = this.classFieldOffsets.get(key);
+
+            this.encoder.bindLabel(nanLabel);
+            this.encoder.emitMovRegImm32(dst, 0);
+            this.encoder.emitJmpLabel(endLabel);
+            this.encoder.bindLabel(trueLabel);
+            this.encoder.emitMovRegImm32(dst, 1);
+            this.encoder.bindLabel(endLabel);
+            return;
+        }
+        // 对于算术运算，将 XMM 结果移回 dst GPR
+        this.encoder.emitMovqRegFromXmm(dst, xmmLeft);
+    }
+
+    // 将表达式加载到 XMM 寄存器
+    private void compileExprToXmm(Expr expr, int xmm, bool isDouble) {
+        if (expr.kind == ExprKind.FloatLiteral) {
+            // 对于浮点字面量，通过 GPR 加载 64-bit 位模式，再 MOVQ 到 XMM
+            long longBits = (long)expr.doubleValue;
+            this.encoder.emitMovRegImm64(Reg.RAX, longBits);
+            this.encoder.emitMovqXmmFromReg(xmm, Reg.RAX);
+        } else if (expr.kind == ExprKind.IntegerLiteral) {
+            // 整数转浮点
+            this.encoder.emitMovRegImm32(Reg.RAX, (int)expr.longValue);
+            if (isDouble) this.encoder.emitCvtsi2sdXmmReg(xmm, Reg.RAX);
+            else this.encoder.emitCvtsi2sdXmmReg(xmm, Reg.RAX); // CVTSI2SS 暂用 SD 版本，X8664 需添加 SS 版本
+        } else if (expr.kind == ExprKind.Variable) {
+            int off = 0;
+            if (this.varStackOffsets.containsKey(expr.strValue)) {
+                off = this.varStackOffsets.get(expr.strValue);
+            }
+            // 从栈加载浮点值到 XMM
+            if (isDouble) this.encoder.emitMovsdXmmMem(xmm, Reg.RBP, off);
+            else this.encoder.emitMovssXmmMem(xmm, Reg.RBP, off);
+        } else if (expr.kind == ExprKind.BinaryOp) {
+            // 递归处理嵌套浮点运算
+            this.compileExprToReg(expr, Reg.RAX);
+            this.encoder.emitMovqXmmFromReg(xmm, Reg.RAX);
+        } else {
+            // 回退: 先编译到 GPR，再 MOVQ 到 XMM
+            this.compileExprToReg(expr, Reg.RAX);
+            this.encoder.emitMovqXmmFromReg(xmm, Reg.RAX);
+        }
+    }
+
+    private void compileAssignment(Expr expr, int dst) {
+        // 确定目标变量类型
+        String targetType = "int";
+        if (expr.target.kind == ExprKind.Variable) {
+            if (this.varStackTypes.containsKey(expr.target.strValue)) {
+                targetType = this.varStackTypes.get(expr.target.strValue);
+            }
+        }
+        bool isTargetFloat = targetType.equals("double") || targetType.equals("float");
+
+        if (isTargetFloat) {
+            // 浮点赋值: 通过 XMM
+            this.compileExprToXmm(expr.value, Reg.XMM0, targetType.equals("double"));
+            if (expr.target.kind == ExprKind.Variable) {
+                int off = 0;
+                if (this.varStackOffsets.containsKey(expr.target.strValue)) {
+                    off = this.varStackOffsets.get(expr.target.strValue);
+                }
+                if (targetType.equals("double")) {
+                    this.encoder.emitMovsdMemXmm(Reg.RBP, off, Reg.XMM0);
+                } else {
+                    this.encoder.emitMovssMemXmm(Reg.RBP, off, Reg.XMM0);
+                }
+            } else if (expr.target.kind == ExprKind.FieldAccess) {
+                this.compileExprToReg(expr.target.receiver, Reg.RCX);
+                int fieldOff = 0;
+                if (this.currentClass != null) {
+                    String key = this.currentClass + "." + expr.target.strValue;
+                    if (this.classFieldOffsets.containsKey(key)) {
+                        fieldOff = this.classFieldOffsets.get(key);
+                    }
+                }
+                if (targetType.equals("double")) {
+                    this.encoder.emitMovsdMemXmm(Reg.RCX, fieldOff, Reg.XMM0);
+                } else {
+                    this.encoder.emitMovssMemXmm(Reg.RCX, fieldOff, Reg.XMM0);
                 }
             }
-            this.encoder.emitMovMemReg(Reg.RCX, fieldOff, Reg.RAX);
+            // 将 XMM 结果移回 dst GPR
+            this.encoder.emitMovqRegFromXmm(dst, Reg.XMM0);
+        } else {
+            this.compileExprToReg(expr.value, Reg.RAX);
+            if (expr.target.kind == ExprKind.Variable) {
+                int off = 0;
+                if (this.varStackOffsets.containsKey(expr.target.strValue)) {
+                    off = this.varStackOffsets.get(expr.target.strValue);
+                }
+                this.encoder.emitMovMemReg(Reg.RBP, off, Reg.RAX);
+            } else if (expr.target.kind == ExprKind.FieldAccess) {
+                this.compileExprToReg(expr.target.receiver, Reg.RCX);
+                int fieldOff = 0;
+                if (this.currentClass != null) {
+                    String key = this.currentClass + "." + expr.target.strValue;
+                    if (this.classFieldOffsets.containsKey(key)) {
+                        fieldOff = this.classFieldOffsets.get(key);
+                    }
+                }
+                this.encoder.emitMovMemReg(Reg.RCX, fieldOff, Reg.RAX);
+            } else if (expr.target.kind == ExprKind.ArrayAccess) {
+                // arr[index] = value  ->  LemonArray_set(arr, index, value)
+                this.encoder.emitPushReg(Reg.RAX); // 保存 value
+                this.compileExprToReg(expr.target.receiver, Reg.RCX);
+                this.compileExprToReg(expr.target.index, Reg.RDX);
+                this.encoder.emitPopReg(Reg.R8); // value in R8
+                this.emitCall("LemonArray_set");
+                this.encoder.emitMovRegReg(Reg.RAX, Reg.RAX); // set返回旧值（或0）
+            }
+            this.encoder.emitMovRegReg(dst, Reg.RAX);
         }
-        this.encoder.emitMovRegReg(dst, Reg.RAX);
     }
 
     private void compileCallExpr(Expr expr, int dst) {
@@ -777,10 +1026,18 @@ class NativeCodeGen {
         if (expr == null) return null;
         if (expr.kind == ExprKind.Variable) {
             String varName = expr.strValue;
-            // 简化：根据变量名推断
+            // 根据变量名推断
             if (varName.equals("sb") || varName.equals("builder")) return "StringBuilder";
             if (varName.equals("arr") || varName.equals("list")) return "LemonArray";
             if (varName.equals("map")) return "LemonMap";
+            // 根据 varStackTypes 中的类型信息推断
+            if (this.varStackTypes.containsKey(varName)) {
+                String t = this.varStackTypes.get(varName);
+                if (t.equals("LemonArray")) return "LemonArray";
+                if (t.equals("LemonMap")) return "LemonMap";
+                if (t.equals("StringBuilder")) return "StringBuilder";
+                if (t.equals("String")) return "String";
+            }
         }
         return null;
     }
