@@ -1,0 +1,3 @@
+[submodule "lemonc_lm"]
+	path = lemonc_lm
+	url = https://github.com/Casaer-X/lemonc_lm.git
