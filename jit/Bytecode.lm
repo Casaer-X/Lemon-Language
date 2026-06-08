@@ -1,0 +1,427 @@
+package lemon.jit;
+
+// ============================================================
+// Lemon 字节码指令定义
+// 基于栈的虚拟机指令集
+// ============================================================
+
+// 字节码操作码
+class OpCode {
+    // ---- 栈操作 ----
+    public static int NOP       = 0;    // 无操作
+    public static int PUSH_NULL = 1;    // 压入 null
+    public static int PUSH_TRUE = 2;    // 压入 true
+    public static int PUSH_FALSE= 3;    // 压入 false
+    public static int PUSH_I8   = 4;    // 压入 int8 常量
+    public static int PUSH_I16  = 5;    // 压入 int16 常量
+    public static int PUSH_I32  = 6;    // 压入 int32 常量
+    public static int PUSH_I64  = 7;    // 压入 int64 常量
+    public static int PUSH_F32  = 8;    // 压入 float32 常量
+    public static int PUSH_F64  = 9;    // 压入 float64 常量
+    public static int PUSH_STR  = 10;   // 压入字符串常量（索引）
+    public static int POP       = 11;   // 弹出栈顶
+    public static int DUP       = 12;   // 复制栈顶
+
+    // ---- 局部变量 ----
+    public static int LOAD_LOCAL  = 16;  // 加载局部变量
+    public static int STORE_LOCAL = 17;  // 存储局部变量
+    public static int LOAD_FIELD  = 18;  // 加载对象字段
+    public static int STORE_FIELD = 19;  // 存储对象字段
+    public static int LOAD_STATIC = 20;  // 加载静态字段
+    public static int STORE_STATIC= 21;  // 存储静态字段
+    public static int LOAD_THIS   = 22;  // 加载 this (self)
+
+    // ---- 算术运算 ----
+    public static int IADD = 32;  // int 加法
+    public static int ISUB = 33;  // int 减法
+    public static int IMUL = 34;  // int 乘法
+    public static int IDIV = 35;  // int 除法
+    public static int IMOD = 36;  // int 取模
+    public static int INEG = 37;  // int 取负
+    public static int LADD = 38;  // long 加法
+    public static int LSUB = 39;  // long 减法
+    public static int LMUL = 40;  // long 乘法
+    public static int LDIV = 41;  // long 除法
+    public static int LMOD = 42;  // long 取模
+    public static int LNEG = 43;  // long 取负
+    public static int FADD = 44;  // float 加法
+    public static int FSUB = 45;  // float 减法
+    public static int FMUL = 46;  // float 乘法
+    public static int FDIV = 47;  // float 除法
+    public static int FNEG = 48;  // float 取负
+    public static int DADD = 49;  // double 加法
+    public static int DSUB = 50;  // double 减法
+    public static int DMUL = 51;  // double 乘法
+    public static int DDIV = 52;  // double 除法
+    public static int DNEG = 53;  // double 取负
+
+    // ---- 位运算 ----
+    public static int IAND = 56;  // int 按位与
+    public static int IOR  = 57;  // int 按位或
+    public static int IXOR = 58;  // int 按位异或
+    public static int ISHL = 59;  // int 左移
+    public static int ISHR = 60;  // int 右移
+    public static int INOT = 61;  // int 按位取反
+    public static int LAND = 62;  // long 按位与
+    public static int LOR  = 63;  // long 按位或
+
+    // ---- 比较运算 ----
+    public static int ICMP_EQ  = 64;  // int ==
+    public static int ICMP_NE  = 65;  // int !=
+    public static int ICMP_LT  = 66;  // int <
+    public static int ICMP_GT  = 67;  // int >
+    public static int ICMP_LE  = 68;  // int <=
+    public static int ICMP_GE  = 69;  // int >=
+    public static int LCMP_EQ  = 70;  // long ==
+    public static int LCMP_NE  = 71;  // long !=
+    public static int FCMP_EQ  = 72;  // float ==
+    public static int FCMP_LT  = 73;  // float <
+    public static int DCMP_EQ  = 74;  // double ==
+    public static int DCMP_LT  = 75;  // double <
+    public static int ACMP_EQ  = 76;  // 引用 ==
+    public static int ACMP_NE  = 77;  // 引用 !=
+
+    // ---- 类型转换 ----
+    public static int I2L = 80;  // int -> long
+    public static int I2F = 81;  // int -> float
+    public static int I2D = 82;  // int -> double
+    public static int L2I = 83;  // long -> int
+    public static int L2F = 84;  // long -> float
+    public static int L2D = 85;  // long -> double
+    public static int F2I = 86;  // float -> int
+    public static int F2L = 87;  // float -> long
+    public static int F2D = 88;  // float -> double
+    public static int D2I = 89;  // double -> int
+    public static int D2L = 90;  // double -> long
+    public static int D2F = 91;  // double -> float
+
+    // ---- 控制流 ----
+    public static int JMP       = 96;  // 无条件跳转 (offset)
+    public static int JMP_TRUE  = 97;  // 为 true 跳转
+    public static int JMP_FALSE = 98;  // 为 false 跳转
+    public static int CALL      = 99;  // 调用函数 (func_index)
+    public static int CALL_VIRT = 100; // 虚方法调用 (vtable_index)
+    public static int CALL_IFACE= 101; // 接口方法调用 (itable_index)
+    public static int CALL_NATIVE=102; // 调用原生函数 (native_index)
+    public static int RET       = 103; // 返回
+    public static int RET_VOID  = 104; // 无返回值返回
+
+    // ---- 对象操作 ----
+    public static int NEW_OBJ   = 112; // 创建对象 (class_index)
+    public static int NEW_ARR   = 113; // 创建数组
+    public static int ARR_LEN   = 114; // 数组长度
+    public static int ARR_GET   = 115; // 数组取值
+    public static int ARR_SET   = 116; // 数组赋值
+    public static int INSTANCEOF= 117; // instanceof 检查
+    public static int CHECKCAST = 118; // 类型转换检查
+
+    // ---- 异常处理 ----
+    public static int THROW     = 128; // 抛出异常
+    public static int TRY_ENTER = 129; // 进入 try 块
+    public static int TRY_EXIT  = 130; // 退出 try 块
+    public static int CATCH     = 131; // 捕获异常
+
+    // ---- Match 操作 ----
+    public static int MATCH_ENUM = 144; // 枚举 match 跳转表
+    public static int MATCH_TAG  = 145; // 标签 match
+
+    // ---- 调试信息 ----
+    public static int LINE_NUM  = 240;  // 行号标记
+    public static int FILE_MARK = 241;  // 文件标记
+
+    // 获取操作码名称
+    public static String name(int opcode) {
+        if (opcode == 0) return "NOP";
+        if (opcode == 1) return "PUSH_NULL";
+        if (opcode == 2) return "PUSH_TRUE";
+        if (opcode == 3) return "PUSH_FALSE";
+        if (opcode == 4) return "PUSH_I8";
+        if (opcode == 5) return "PUSH_I16";
+        if (opcode == 6) return "PUSH_I32";
+        if (opcode == 7) return "PUSH_I64";
+        if (opcode == 8) return "PUSH_F32";
+        if (opcode == 9) return "PUSH_F64";
+        if (opcode == 10) return "PUSH_STR";
+        if (opcode == 11) return "POP";
+        if (opcode == 12) return "DUP";
+        if (opcode == 16) return "LOAD_LOCAL";
+        if (opcode == 17) return "STORE_LOCAL";
+        if (opcode == 18) return "LOAD_FIELD";
+        if (opcode == 19) return "STORE_FIELD";
+        if (opcode == 20) return "LOAD_STATIC";
+        if (opcode == 21) return "STORE_STATIC";
+        if (opcode == 22) return "LOAD_THIS";
+        if (opcode == 32) return "IADD";
+        if (opcode == 33) return "ISUB";
+        if (opcode == 34) return "IMUL";
+        if (opcode == 35) return "IDIV";
+        if (opcode == 36) return "IMOD";
+        if (opcode == 37) return "INEG";
+        if (opcode == 38) return "LADD";
+        if (opcode == 39) return "LSUB";
+        if (opcode == 40) return "LMUL";
+        if (opcode == 41) return "LDIV";
+        if (opcode == 42) return "LMOD";
+        if (opcode == 43) return "LNEG";
+        if (opcode == 44) return "FADD";
+        if (opcode == 45) return "FSUB";
+        if (opcode == 46) return "FMUL";
+        if (opcode == 47) return "FDIV";
+        if (opcode == 48) return "FNEG";
+        if (opcode == 49) return "DADD";
+        if (opcode == 50) return "DSUB";
+        if (opcode == 51) return "DMUL";
+        if (opcode == 52) return "DDIV";
+        if (opcode == 53) return "DNEG";
+        if (opcode == 56) return "IAND";
+        if (opcode == 57) return "IOR";
+        if (opcode == 58) return "IXOR";
+        if (opcode == 59) return "ISHL";
+        if (opcode == 60) return "ISHR";
+        if (opcode == 61) return "INOT";
+        if (opcode == 62) return "LAND";
+        if (opcode == 63) return "LOR";
+        if (opcode == 64) return "ICMP_EQ";
+        if (opcode == 65) return "ICMP_NE";
+        if (opcode == 66) return "ICMP_LT";
+        if (opcode == 67) return "ICMP_GT";
+        if (opcode == 68) return "ICMP_LE";
+        if (opcode == 69) return "ICMP_GE";
+        if (opcode == 70) return "LCMP_EQ";
+        if (opcode == 71) return "LCMP_NE";
+        if (opcode == 72) return "FCMP_EQ";
+        if (opcode == 73) return "FCMP_LT";
+        if (opcode == 74) return "DCMP_EQ";
+        if (opcode == 75) return "DCMP_LT";
+        if (opcode == 76) return "ACMP_EQ";
+        if (opcode == 77) return "ACMP_NE";
+        if (opcode == 80) return "I2L";
+        if (opcode == 81) return "I2F";
+        if (opcode == 82) return "I2D";
+        if (opcode == 83) return "L2I";
+        if (opcode == 84) return "L2F";
+        if (opcode == 85) return "L2D";
+        if (opcode == 86) return "F2I";
+        if (opcode == 87) return "F2L";
+        if (opcode == 88) return "F2D";
+        if (opcode == 89) return "D2I";
+        if (opcode == 90) return "D2L";
+        if (opcode == 91) return "D2F";
+        if (opcode == 96) return "JMP";
+        if (opcode == 97) return "JMP_TRUE";
+        if (opcode == 98) return "JMP_FALSE";
+        if (opcode == 99) return "CALL";
+        if (opcode == 100) return "CALL_VIRT";
+        if (opcode == 101) return "CALL_IFACE";
+        if (opcode == 102) return "CALL_NATIVE";
+        if (opcode == 103) return "RET";
+        if (opcode == 104) return "RET_VOID";
+        if (opcode == 112) return "NEW_OBJ";
+        if (opcode == 113) return "NEW_ARR";
+        if (opcode == 114) return "ARR_LEN";
+        if (opcode == 115) return "ARR_GET";
+        if (opcode == 116) return "ARR_SET";
+        if (opcode == 117) return "INSTANCEOF";
+        if (opcode == 118) return "CHECKCAST";
+        if (opcode == 128) return "THROW";
+        if (opcode == 129) return "TRY_ENTER";
+        if (opcode == 130) return "TRY_EXIT";
+        if (opcode == 131) return "CATCH";
+        if (opcode == 144) return "MATCH_ENUM";
+        if (opcode == 145) return "MATCH_TAG";
+        if (opcode == 240) return "LINE_NUM";
+        if (opcode == 241) return "FILE_MARK";
+        return "UNKNOWN_" + opcode;
+    }
+}
+
+// 字节码指令
+class BytecodeInstruction {
+    public int opcode;
+    public int operand;      // 操作数（索引/偏移/常量）
+    public long longOperand;  // 64 位操作数
+    public double floatOperand; // 浮点操作数
+    public int line;          // 源码行号
+
+    public BytecodeInstruction(int op) {
+        this.opcode = op;
+        this.operand = 0;
+        this.longOperand = 0;
+        this.floatOperand = 0.0;
+        this.line = 0;
+    }
+
+    public static BytecodeInstruction withOperand(int op, int operand) {
+        BytecodeInstruction inst = new BytecodeInstruction(op);
+        inst.operand = operand;
+        return inst;
+    }
+
+    public static BytecodeInstruction withLong(int op, long val) {
+        BytecodeInstruction inst = new BytecodeInstruction(op);
+        inst.longOperand = val;
+        return inst;
+    }
+
+    public static BytecodeInstruction withDouble(int op, double val) {
+        BytecodeInstruction inst = new BytecodeInstruction(op);
+        inst.floatOperand = val;
+        return inst;
+    }
+
+    public String toString() {
+        String name = OpCode.name(this.opcode);
+        if (this.opcode == OpCode.PUSH_I32 || this.opcode == OpCode.PUSH_I16 || this.opcode == OpCode.PUSH_I8) {
+            return name + " " + this.operand;
+        }
+        if (this.opcode == OpCode.PUSH_I64) {
+            return name + " " + this.longOperand;
+        }
+        if (this.opcode == OpCode.PUSH_F32 || this.opcode == OpCode.PUSH_F64) {
+            return name + " " + this.floatOperand;
+        }
+        if (this.opcode == OpCode.PUSH_STR || this.opcode == OpCode.LOAD_LOCAL ||
+            this.opcode == OpCode.STORE_LOCAL || this.opcode == OpCode.LOAD_FIELD ||
+            this.opcode == OpCode.STORE_FIELD || this.opcode == OpCode.NEW_OBJ ||
+            this.opcode == OpCode.CALL || this.opcode == OpCode.CALL_VIRT ||
+            this.opcode == OpCode.CALL_IFACE || this.opcode == OpCode.CALL_NATIVE ||
+            this.opcode == OpCode.JMP || this.opcode == OpCode.JMP_TRUE ||
+            this.opcode == OpCode.JMP_FALSE || this.opcode == OpCode.LINE_NUM) {
+            return name + " " + this.operand;
+        }
+        return name;
+    }
+}
+
+// 字节码函数
+class BytecodeFunction {
+    public String name;
+    public String className;   // 所属类（null 表示顶层函数）
+    public int localCount;     // 局部变量数量
+    public int paramCount;     // 参数数量
+    public Array<BytecodeInstruction> instructions;
+    public Array<String> localNames;  // 局部变量名
+
+    public BytecodeFunction(String name) {
+        this.name = name;
+        this.className = null;
+        this.localCount = 0;
+        this.paramCount = 0;
+        this.instructions = new Array<BytecodeInstruction>();
+        this.localNames = new Array<String>();
+    }
+
+    public void emit(int opcode) {
+        this.instructions.add(new BytecodeInstruction(opcode));
+    }
+
+    public void emitWithOperand(int opcode, int operand) {
+        this.instructions.add(BytecodeInstruction.withOperand(opcode, operand));
+    }
+
+    public void emitWithLong(int opcode, long val) {
+        this.instructions.add(BytecodeInstruction.withLong(opcode, val));
+    }
+
+    public void emitWithDouble(int opcode, double val) {
+        this.instructions.add(BytecodeInstruction.withDouble(opcode, val));
+    }
+
+    public int addLocal(String name) {
+        int index = this.localCount;
+        this.localNames.add(name);
+        this.localCount = this.localCount + 1;
+        return index;
+    }
+
+    public int findLocal(String name) {
+        for (int i = 0; i < this.localNames.size(); i++) {
+            if (String.equals(this.localNames.get(i), name)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+}
+
+// 字节码类
+class BytecodeClass {
+    public String name;
+    public String parent;
+    public Array<String> interfaces;
+    public Array<BytecodeFunction> methods;
+    public Array<String> fieldNames;
+    public Array<String> fieldTypes;
+    public int instanceSize;
+
+    public BytecodeClass(String name) {
+        this.name = name;
+        this.parent = null;
+        this.interfaces = new Array<String>();
+        this.methods = new Array<BytecodeFunction>();
+        this.fieldNames = new Array<String>();
+        this.fieldTypes = new Array<String>();
+        this.instanceSize = 0;
+    }
+
+    public void addField(String name, String type, int size) {
+        this.fieldNames.add(name);
+        this.fieldTypes.add(type);
+        this.instanceSize = this.instanceSize + size;
+    }
+
+    public int findField(String name) {
+        for (int i = 0; i < this.fieldNames.size(); i++) {
+            if (String.equals(this.fieldNames.get(i), name)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+}
+
+// 字节码模块
+class BytecodeModule {
+    public Array<String> stringPool;       // 字符串常量池
+    public Array<BytecodeFunction> functions;  // 顶层函数
+    public Array<BytecodeClass> classes;       // 类
+    public String mainClass;                   // main 入口类名
+
+    public BytecodeModule() {
+        this.stringPool = new Array<String>();
+        this.functions = new Array<BytecodeFunction>();
+        this.classes = new Array<BytecodeClass>();
+        this.mainClass = null;
+    }
+
+    public int addString(String value) {
+        for (int i = 0; i < this.stringPool.size(); i++) {
+            if (String.equals(this.stringPool.get(i), value)) {
+                return i;
+            }
+        }
+        int index = this.stringPool.size();
+        this.stringPool.add(value);
+        return index;
+    }
+
+    public BytecodeClass findClass(String name) {
+        for (int i = 0; i < this.classes.size(); i++) {
+            BytecodeClass cls = this.classes.get(i);
+            if (cls.name.equals(name)) {
+                return cls;
+            }
+        }
+        return null;
+    }
+
+    public BytecodeFunction findFunction(String name) {
+        for (int i = 0; i < this.functions.size(); i++) {
+            BytecodeFunction func = this.functions.get(i);
+            if (func.name.equals(name)) {
+                return func;
+            }
+        }
+        return null;
+    }
+}

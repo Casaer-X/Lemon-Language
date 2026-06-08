@@ -1,0 +1,449 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdarg.h>
+#include <setjmp.h>
+
+typedef struct LemonException {
+    const char* type;
+    void* value;
+    jmp_buf buf;
+} LemonException;
+
+static LemonException* _exc_stack = NULL;
+
+void lemon_throw(const char* type, void* value) {
+    if (!_exc_stack) { fprintf(stderr, "Unhandled exception: %s\n", type); exit(1); }
+    _exc_stack->type = type;
+    _exc_stack->value = value;
+    longjmp(_exc_stack->buf, 1);
+}
+
+typedef void* LemonObject;
+
+typedef struct TypeInfo {
+    char* name;
+    int size;
+    void (*dtor)(void*);
+} TypeInfo;
+
+typedef struct GcHeader {
+    TypeInfo* type_info;
+    int marked;
+    struct GcHeader* next;
+} GcHeader;
+
+static GcHeader* _gc_root = NULL;
+static int _gc_enabled = 1;
+
+void gc_init() { _gc_root = NULL; _gc_enabled = 1; }
+
+void* gc_alloc(size_t size, TypeInfo* ti) {
+    if (!_gc_enabled) return malloc(size);
+    GcHeader* hdr = (GcHeader*)malloc(sizeof(GcHeader) + size);
+    if (!hdr) return NULL;
+    hdr->type_info = ti;
+    hdr->marked = 0;
+    hdr->next = _gc_root;
+    _gc_root = hdr;
+    return (void*)(hdr + 1);
+}
+
+void gc_mark(void* obj) {
+    if (!obj) return;
+    GcHeader* hdr = ((GcHeader*)obj) - 1;
+    hdr->marked = 1;
+}
+void gc_unmark_all() {
+    GcHeader* cur = _gc_root;
+    while (cur) { cur->marked = 0; cur = cur->next; }
+}
+void gc_sweep() {
+    GcHeader** p = &_gc_root;
+    while (*p) {
+        if (!(*p)->marked) {
+            GcHeader* unreached = *p;
+            *p = unreached->next;
+            if (unreached->type_info && unreached->type_info->dtor) {
+                unreached->type_info->dtor((void*)(unreached + 1));
+            }
+            free(unreached);
+        } else {
+            (*p)->marked = 0;
+            p = &(*p)->next;
+        }
+    }
+}
+
+static TypeInfo _type_info_unknown = {"unknown", 0, NULL};
+TypeInfo* type_of(void* obj) {
+    (void)obj;
+    return &_type_info_unknown;
+}
+
+int String_length(const char* s) { return s ? (int)strlen(s) : 0; }
+char* String_toUpperCase(const char* s) {
+    if (!s) return NULL;
+    char* r = strdup(s);
+    for (char* p = r; *p; p++) *p = (*p >= 'a' && *p <= 'z') ? *p - 32 : *p;
+    return r;
+}
+char* String_toLowerCase(const char* s) {
+    if (!s) return NULL;
+    char* r = strdup(s);
+    for (char* p = r; *p; p++) *p = (*p >= 'A' && *p <= 'Z') ? *p + 32 : *p;
+    return r;
+}
+int String_equals(const char* a, const char* b) {
+    if (!a || !b) return a == b;
+    return strcmp(a, b) == 0;
+}
+char* String_trim(const char* s) {
+    if (!s) return NULL;
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
+    if (!*s) return strdup("");
+    const char* end = s + strlen(s) - 1;
+    while (end > s && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) end--;
+    size_t len = end - s + 1;
+    char* r = (char*)malloc(len + 1);
+    memcpy(r, s, len);
+    r[len] = '\0';
+    return r;
+}
+char* String_substring(const char* s, int start, int end) {
+    if (!s) return NULL;
+    int slen = (int)strlen(s);
+    if (start < 0) start = 0;
+    if (end > slen) end = slen;
+    if (start >= end) return strdup("");
+    size_t len = end - start;
+    char* r = (char*)malloc(len + 1);
+    memcpy(r, s + start, len);
+    r[len] = '\0';
+    return r;
+}
+int String_indexOf(const char* s, const char* sub) {
+    if (!s || !sub) return -1;
+    char* p = strstr(s, sub);
+    return p ? (int)(p - s) : -1;
+}
+char* String_replace(const char* s, const char* old, const char* new_s) {
+    if (!s || !old || !new_s) return s ? strdup(s) : NULL;
+    size_t slen = strlen(s), olen = strlen(old), nlen = strlen(new_s);
+    size_t count = 0;
+    const char* p = s;
+    while ((p = strstr(p, old))) { count++; p += olen; }
+    size_t rlen = slen + count * (nlen - olen);
+    char* r = (char*)malloc(rlen + 1);
+    char* dst = r;
+    p = s;
+    while (*p) {
+        if (strncmp(p, old, olen) == 0) {
+            memcpy(dst, new_s, nlen); dst += nlen; p += olen;
+        } else { *dst++ = *p++; }
+    }
+    *dst = '\0';
+    return r;
+}
+char* String_intToString(int32_t v) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", v);
+    return strdup(buf);
+}
+int32_t String_toInt(const char* s) {
+    if (!s) return 0;
+    return (int32_t)atoi(s);
+}
+
+typedef struct LemonArray {
+    int32_t length;
+    int32_t capacity;
+    int32_t elem_size;
+    void* data;
+} LemonArray;
+
+LemonArray* LemonArray_new(int32_t elem_size) {
+    LemonArray* arr = (LemonArray*)malloc(sizeof(LemonArray));
+    arr->length = 0;
+    arr->capacity = 8;
+    arr->elem_size = elem_size;
+    arr->data = malloc(arr->capacity * elem_size);
+    return arr;
+}
+
+void LemonArray_ensureCapacity(LemonArray* arr, int32_t min_cap) {
+    if (arr->capacity >= min_cap) return;
+    while (arr->capacity < min_cap) arr->capacity *= 2;
+    arr->data = realloc(arr->data, arr->capacity * arr->elem_size);
+}
+
+void LemonArray_add(LemonArray* arr, void* elem) {
+    LemonArray_ensureCapacity(arr, arr->length + 1);
+    memcpy((char*)arr->data + arr->length * arr->elem_size, elem, arr->elem_size);
+    arr->length++;
+}
+
+void* LemonArray_get(LemonArray* arr, int32_t index) {
+    if (index < 0 || index >= arr->length) return NULL;
+    return (char*)arr->data + index * arr->elem_size;
+}
+
+void LemonArray_set(LemonArray* arr, int32_t index, void* elem) {
+    if (index < 0 || index >= arr->length) return;
+    memcpy((char*)arr->data + index * arr->elem_size, elem, arr->elem_size);
+}
+
+int32_t LemonArray_size(LemonArray* arr) { return arr ? arr->length : 0; }
+
+void LemonArray_removeAt(LemonArray* arr, int32_t index) {
+    if (index < 0 || index >= arr->length) return;
+    memmove((char*)arr->data + index * arr->elem_size,
+            (char*)arr->data + (index + 1) * arr->elem_size,
+            (arr->length - index - 1) * arr->elem_size);
+    arr->length--;
+}
+
+typedef struct LemonMapEntry {
+    char* key;
+    void* value;
+    int occupied;
+} LemonMapEntry;
+
+typedef struct LemonMap {
+    int32_t size;
+    int32_t capacity;
+    LemonMapEntry* entries;
+} LemonMap;
+
+static uint32_t _map_hash(const char* key) {
+    uint32_t h = 2166136261u;
+    for (const char* p = key; *p; p++) { h ^= (uint8_t)*p; h *= 16777619u; }
+    return h;
+}
+
+LemonMap* LemonMap_new() {
+    LemonMap* map = (LemonMap*)malloc(sizeof(LemonMap));
+    map->size = 0;
+    map->capacity = 16;
+    map->entries = (LemonMapEntry*)calloc(map->capacity, sizeof(LemonMapEntry));
+    return map;
+}
+
+void LemonMap_put(LemonMap* map, const char* key, void* value) {
+    if (map->size * 2 >= map->capacity) {
+        int32_t old_cap = map->capacity;
+        LemonMapEntry* old = map->entries;
+        map->capacity *= 2;
+        map->entries = (LemonMapEntry*)calloc(map->capacity, sizeof(LemonMapEntry));
+        map->size = 0;
+        for (int32_t i = 0; i < old_cap; i++) {
+            if (old[i].occupied) LemonMap_put(map, old[i].key, old[i].value);
+        }
+        free(old);
+        LemonMap_put(map, key, value);
+        return;
+    }
+    uint32_t idx = _map_hash(key) % map->capacity;
+    while (map->entries[idx].occupied) {
+        if (strcmp(map->entries[idx].key, key) == 0) {
+            map->entries[idx].value = value;
+            return;
+        }
+        idx = (idx + 1) % map->capacity;
+    }
+    map->entries[idx].key = strdup(key);
+    map->entries[idx].value = value;
+    map->entries[idx].occupied = 1;
+    map->size++;
+}
+
+void* LemonMap_get(LemonMap* map, const char* key) {
+    if (!map || map->size == 0) return NULL;
+    uint32_t idx = _map_hash(key) % map->capacity;
+    for (int32_t i = 0; i < map->capacity; i++) {
+        if (!map->entries[idx].occupied) return NULL;
+        if (strcmp(map->entries[idx].key, key) == 0) return map->entries[idx].value;
+        idx = (idx + 1) % map->capacity;
+    }
+    return NULL;
+}
+
+int32_t LemonMap_size(LemonMap* map) { return map ? map->size : 0; }
+
+int LemonMap_containsKey(LemonMap* map, const char* key) {
+    return LemonMap_get(map, key) != NULL;
+}
+
+void LemonMap_remove(LemonMap* map, const char* key) {
+    if (!map || map->size == 0) return;
+    uint32_t idx = _map_hash(key) % map->capacity;
+    for (int32_t i = 0; i < map->capacity; i++) {
+        if (!map->entries[idx].occupied) return;
+        if (strcmp(map->entries[idx].key, key) == 0) {
+            free(map->entries[idx].key);
+            map->entries[idx].key = NULL;
+            map->entries[idx].value = NULL;
+            map->entries[idx].occupied = 0;
+            map->size--;
+            return;
+        }
+        idx = (idx + 1) % map->capacity;
+    }
+}
+
+typedef struct Random Random;
+typedef struct RandomUtils RandomUtils;
+
+struct Random {
+    void** vtable;
+    int32_t seed;
+};
+
+struct RandomUtils {
+    void** vtable;
+};
+
+
+Random* Random_ctor(Random* self);
+Random* Random_ctor(Random* self, int32_t seed);
+int32_t Random_nextInt(Random* self);
+int32_t Random_nextInt_i(Random* self, int32_t bound);
+int32_t Random_nextInt_i_i(Random* self, int32_t min, int32_t max);
+double Random_nextDouble(Random* self);
+double Random_nextDouble_d_d(Random* self, double min, double max);
+int Random_nextBool(Random* self);
+void Random_setSeed_i(Random* self, int32_t seed);
+int32_t Random_getSeed(Random* self);
+RandomUtils* RandomUtils_ctor(RandomUtils* self);
+int32_t RandomUtils_randomInt_i(RandomUtils* self, int32_t bound);
+int32_t RandomUtils_randomInt_i_i(RandomUtils* self, int32_t min, int32_t max);
+double RandomUtils_randomDouble(RandomUtils* self);
+double RandomUtils_randomDouble_d_d(RandomUtils* self, double min, double max);
+int RandomUtils_randomBool(RandomUtils* self);
+int32_t RandomUtils_randomChoice_i_i(RandomUtils* self, int32_t a, int32_t b);
+
+Random* Random_ctor(Random* self) {
+    (self->seed = 12345);
+    self->vtable = NULL;
+    return self;
+}
+
+Random* Random_ctor(Random* self, int32_t seed) {
+    (self->seed = seed);
+    self->vtable = NULL;
+    return self;
+}
+
+int32_t Random_nextInt(Random* self) {
+    (self->seed = ((self->seed * 1103515245) + 12345));
+    (self->seed = (self->seed % 2147483647));
+    if ((self->seed < 0)) {
+        (self->seed = (-self->seed));
+    }
+    return self->seed;
+}
+
+int32_t Random_nextInt_i(Random* self, int32_t bound) {
+    if ((bound <= 0)) {
+        return 0;
+    }
+    (self->seed = ((self->seed * 1103515245) + 12345));
+    (self->seed = (self->seed % 2147483647));
+    if ((self->seed < 0)) {
+        (self->seed = (-self->seed));
+    }
+    return (self->seed % bound);
+}
+
+int32_t Random_nextInt_i_i(Random* self, int32_t min, int32_t max) {
+    if ((min >= max)) {
+        return min;
+    }
+    int32_t range = (max - min);
+    (self->seed = ((self->seed * 1103515245) + 12345));
+    (self->seed = (self->seed % 2147483647));
+    if ((self->seed < 0)) {
+        (self->seed = (-self->seed));
+    }
+    return (min + (self->seed % range));
+}
+
+double Random_nextDouble(Random* self) {
+    (self->seed = ((self->seed * 1103515245) + 12345));
+    (self->seed = (self->seed % 2147483647));
+    if ((self->seed < 0)) {
+        (self->seed = (-self->seed));
+    }
+    return (((double) self->seed) / 2147483647.000000);
+}
+
+double Random_nextDouble_d_d(Random* self, double min, double max) {
+    if ((min >= max)) {
+        return min;
+    }
+    double range = (max - min);
+    (self->seed = ((self->seed * 1103515245) + 12345));
+    (self->seed = (self->seed % 2147483647));
+    if ((self->seed < 0)) {
+        (self->seed = (-self->seed));
+    }
+    double d = (((double) self->seed) / 2147483647.000000);
+    return (min + (d * range));
+}
+
+int Random_nextBool(Random* self) {
+    (self->seed = ((self->seed * 1103515245) + 12345));
+    (self->seed = (self->seed % 2147483647));
+    if ((self->seed < 0)) {
+        (self->seed = (-self->seed));
+    }
+    return ((self->seed % 2) == 1);
+}
+
+void Random_setSeed_i(Random* self, int32_t seed) {
+    (self->seed = seed);
+}
+
+int32_t Random_getSeed(Random* self) {
+    return self->seed;
+}
+
+RandomUtils* RandomUtils_ctor(RandomUtils* self) {
+    self->vtable = NULL;
+    return self;
+}
+
+int32_t RandomUtils_randomInt_i(RandomUtils* self, int32_t bound) {
+    Random* r = Random_ctor(malloc(sizeof(Random)));
+    return Random_nextInt_i((Random*)r, bound);
+}
+
+int32_t RandomUtils_randomInt_i_i(RandomUtils* self, int32_t min, int32_t max) {
+    Random* r = Random_ctor(malloc(sizeof(Random)));
+    return Random_nextInt_i_i((Random*)r, min, max);
+}
+
+double RandomUtils_randomDouble(RandomUtils* self) {
+    Random* r = Random_ctor(malloc(sizeof(Random)));
+    return Random_nextDouble((Random*)r);
+}
+
+double RandomUtils_randomDouble_d_d(RandomUtils* self, double min, double max) {
+    Random* r = Random_ctor(malloc(sizeof(Random)));
+    return Random_nextDouble_d_d((Random*)r, min, max);
+}
+
+int RandomUtils_randomBool(RandomUtils* self) {
+    Random* r = Random_ctor(malloc(sizeof(Random)));
+    return Random_nextBool((Random*)r);
+}
+
+int32_t RandomUtils_randomChoice_i_i(RandomUtils* self, int32_t a, int32_t b) {
+    Random* r = Random_ctor(malloc(sizeof(Random)));
+    if (Random_nextBool((Random*)r)) {
+        return a;
+    }
+    return b;
+}
+

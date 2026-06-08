@@ -1,0 +1,693 @@
+package lemon.codegen;
+
+// ============================================================
+// PE32+ 链接器
+// 将 COFF64 目标文件链接为 PE32+ 可执行文件 (.exe)
+//
+// PE32+ 文件结构:
+//   1. DOS 头 (64 字节)
+//   2. PE 签名 (4 字节 "PE\0\0")
+//   3. COFF 头 (24 字节)
+//   4. 可选头 (240 字节 PE32+)
+//   5. 段表 (每段 40 字节)
+//   6. 段数据
+//   7. 导入表 (.idata)
+// ============================================================
+
+// PE 合并段
+class PEMergedSection {
+    public String name;
+    public Array<int> data;
+    public int characteristics;
+    public Array<String> symbolNames;
+    public Array<int> symbolOffsets;
+    public Array<PEReloc> relocs;
+
+    public PEMergedSection(String name, int characteristics) {
+        this.name = name;
+        this.data = new Array<int>();
+        this.characteristics = characteristics;
+        this.symbolNames = new Array<String>();
+        this.symbolOffsets = new Array<int>();
+        this.relocs = new Array<PEReloc>();
+    }
+
+    public void addSymbol(String name, int offset) {
+        this.symbolNames.add(name);
+        this.symbolOffsets.add(offset);
+    }
+
+    public int findSymbol(String name) {
+        for (int i = 0; i < this.symbolNames.size(); i++) {
+            String symName = this.symbolNames.get(i);
+            if (symName.equals(name)) {
+                return this.symbolOffsets.get(i);
+            }
+        }
+        return -1;
+    }
+}
+
+// PE 重定位
+class PEReloc {
+    public int offset;
+    public String symbolName;
+    public int type;
+
+    public PEReloc(int offset, String symbolName, int type) {
+        this.offset = offset;
+        this.symbolName = symbolName;
+        this.type = type;
+    }
+}
+
+// 导入信息
+class PEImportInfo {
+    public String dllName;
+    public Array<String> functions;
+
+    public PEImportInfo(String dllName) {
+        this.dllName = dllName;
+        this.functions = new Array<String>();
+    }
+}
+
+// PE32+ 链接器
+class PELinker {
+    public Array<PEMergedSection> sections;
+    public String entryPoint;
+    public Array<String> undefinedSymbols;
+
+    // PE 常量
+    public static int DOS_HEADER_SIZE = 64;
+    public static int PE_SIGNATURE_SIZE = 4;
+    public static int COFF_HEADER_SIZE = 24;
+    public static int OPTIONAL_HEADER_SIZE = 240;
+    public static int SECTION_HEADER_SIZE = 40;
+
+    public static int FILE_ALIGNMENT = 512;     // 0x200
+    public static int SECTION_ALIGNMENT = 4096;  // 0x1000
+    public static long IMAGE_BASE = 4194304;    // 0x400000
+
+    public PELinker() {
+        this.sections = new Array<PEMergedSection>();
+        this.entryPoint = "main";
+        this.undefinedSymbols = new Array<String>();
+    }
+
+    public void setEntryPoint(String name) {
+        this.entryPoint = name;
+    }
+
+    // ---- 添加 COFF64 目标文件 ----
+
+    public void addObject(COFF64 coff) {
+        // 合并 COFF 的段到 PE 的段
+        for (int si = 0; si < coff.sections.size(); si++) {
+            // 注意: COFF64.sections 是 private，需要通过 serialize
+            // 这里简化处理：直接从 NativeModule 构建
+        }
+    }
+
+    // ---- 从 NativeModule 直接构建 ----
+
+    public void addNativeModule(NativeModule module) {
+        // 确保 .text 段存在
+        PEMergedSection textSec = this.findOrCreateSection(".text",
+            COFF64.SCN_CNT_CODE | COFF64.SCN_MEM_EXEC | COFF64.SCN_MEM_READ);
+        PEMergedSection dataSec = this.findOrCreateSection(".data",
+            COFF64.SCN_CNT_IDATA | COFF64.SCN_MEM_READ | COFF64.SCN_MEM_WRITE);
+
+        // 添加函数到 .text 段
+        int textOffset = textSec.data.size();
+        for (int fi = 0; fi < module.functions.size(); fi++) {
+            NativeFunction func = module.functions.get(fi);
+            textSec.addSymbol(func.name, textOffset);
+
+            for (int bi = 0; bi < func.code.size(); bi++) {
+                textSec.data.add(func.code.get(bi));
+            }
+
+            textOffset = textOffset + func.code.size();
+        }
+
+        // 对齐 .text 段
+        while (textSec.data.size() % 16 != 0) {
+            textSec.data.add(0);
+        }
+
+        // 添加数据到 .data 段
+        int dataOffset = dataSec.data.size();
+        for (int di = 0; di < module.dataEntries.size(); di++) {
+            NativeData data = module.dataEntries.get(di);
+            dataSec.addSymbol(data.name, dataOffset);
+
+            for (int bi = 0; bi < data.bytes.size(); bi++) {
+                dataSec.data.add(data.bytes.get(bi));
+            }
+
+            dataOffset = dataOffset + data.bytes.size();
+        }
+
+        // 对齐 .data 段
+        while (dataSec.data.size() % 8 != 0) {
+            dataSec.data.add(0);
+        }
+
+        // 收集未定义符号（外部函数）
+        for (int ei = 0; ei < module.externNames.size(); ei++) {
+            String extName = module.externNames.get(ei);
+            bool found = false;
+            for (int ui = 0; ui < this.undefinedSymbols.size(); ui++) {
+                String undefName = this.undefinedSymbols.get(ui);
+                if (undefName.equals(extName)) {
+                    found = true;
+                }
+            }
+            if (!found) {
+                this.undefinedSymbols.add(extName);
+            }
+        }
+    }
+
+    private PEMergedSection findOrCreateSection(String name, int characteristics) {
+        for (int i = 0; i < this.sections.size(); i++) {
+            PEMergedSection sec = this.sections.get(i);
+            String secName = sec.name;
+            if (secName.equals(name)) {
+                return sec;
+            }
+        }
+        PEMergedSection sec = new PEMergedSection(name, characteristics);
+        this.sections.add(sec);
+        return sec;
+    }
+
+    // ---- 生成导入 thunks ----
+
+    private void generateImportThunks() {
+        if (this.undefinedSymbols.size() == 0) return;
+
+        PEMergedSection textSec = this.findOrCreateSection(".text", 0);
+
+        // 对齐
+        while (textSec.data.size() % 16 != 0) {
+            textSec.data.add(0);
+        }
+
+        for (int i = 0; i < this.undefinedSymbols.size(); i++) {
+            String funcName = this.undefinedSymbols.get(i);
+            int thunkOffset = textSec.data.size();
+            textSec.addSymbol("__imp_" + funcName, thunkOffset);
+
+            // jmp [rip + disp32] = FF 25 00 00 00 00
+            // 位移稍后由 patchImportThunks 填充
+            textSec.data.add(255); // FF
+            textSec.data.add(37);  // 25
+            textSec.data.add(0);   // disp32 (稍后填充)
+            textSec.data.add(0);
+            textSec.data.add(0);
+            textSec.data.add(0);
+        }
+    }
+
+    // 回填 import thunk 的 jmp 位移，指向 IAT 条目
+    private void patchImportThunks(Array<int> sectionRVAs, Array<int> iatRVAs, Array<String> thunkNames) {
+        PEMergedSection textSec = this.findOrCreateSection(".text", 0);
+
+        for (int ti = 0; ti < thunkNames.size(); ti++) {
+            String tname = thunkNames.get(ti);
+            int thunkOff = textSec.findSymbol("__imp_" + tname);
+            if (thunkOff < 0) continue;
+
+            // 查找 IAT RVA
+            int iatRVA = iatRVAs.get(ti);
+
+            // 计算 thunk 的 RVA
+            int textSecIdx = -1;
+            for (int si = 0; si < this.sections.size(); si++) {
+                PEMergedSection sec = this.sections.get(si);
+                String secName = sec.name;
+                if (secName.equals(".text")) {
+                    textSecIdx = si;
+                }
+            }
+            if (textSecIdx < 0) continue;
+
+            int thunkRVA = sectionRVAs.get(textSecIdx) + thunkOff;
+
+            // jmp [rip + disp32] 的 disp32 在偏移 +2 处
+            // disp = target_RVA - (thunkRVA + 6)
+            int disp = iatRVA - (thunkRVA + 6);
+
+            // 回写到 data
+            int writeOff = thunkOff + 2;
+            if (writeOff + 3 < textSec.data.size()) {
+                textSec.data.set(writeOff + 0, disp & 255);
+                textSec.data.set(writeOff + 1, (disp >> 8) & 255);
+                textSec.data.set(writeOff + 2, (disp >> 16) & 255);
+                textSec.data.set(writeOff + 3, (disp >> 24) & 255);
+            }
+        }
+    }
+
+    // ---- 生成导入表 ----
+
+    private Array<PEImportInfo> buildImportTable() {
+        Array<PEImportInfo> imports = new Array<PEImportInfo>();
+
+        for (int i = 0; i < this.undefinedSymbols.size(); i++) {
+            String funcName = this.undefinedSymbols.get(i);
+            String dllName = this.resolveDll(funcName);
+
+            PEImportInfo importInfo = null;
+            for (int j = 0; j < imports.size(); j++) {
+                PEImportInfo imp = imports.get(j);
+                String impDllName = imp.dllName;
+                if (impDllName.equals(dllName)) {
+                    importInfo = imp;
+                }
+            }
+            if (importInfo == null) {
+                importInfo = new PEImportInfo(dllName);
+                imports.add(importInfo);
+            }
+            importInfo.functions.add(funcName);
+        }
+
+        return imports;
+    }
+
+    private String resolveDll(String funcName) {
+        // 所有外部函数都从 msvcrt 导入
+        return "msvcrt.dll";
+    }
+
+    // ---- 生成 PE32+ 可执行文件 ----
+
+    public Array<int> buildPE() {
+        // 1. 生成导入 thunks
+        this.generateImportThunks();
+
+        // 2. 构建导入表
+        Array<PEImportInfo> imports = this.buildImportTable();
+
+        // 3. 记录 idata 段索引（如果存在）和 IDT 偏移
+        int idataSecIdx = -1;
+        for (int i = 0; i < this.sections.size(); i++) {
+            PEMergedSection sec = this.sections.get(i);
+            String secName = sec.name;
+            if (secName.equals(".idata")) {
+                idataSecIdx = i;
+            }
+        }
+
+        // 4. 添加 .idata 段
+        int idtRVA = 0;
+        int idtSize = 0;
+        Array<int> iatRVAs = new Array<int>();
+        if (imports.size() > 0) {
+            this.buildIdataSection(imports);
+            // 重新获取 .idata 段索引
+            for (int i = 0; i < this.sections.size(); i++) {
+                PEMergedSection sec = this.sections.get(i);
+                String secName = sec.name;
+                if (secName.equals(".idata")) {
+                    idataSecIdx = i;
+                }
+            }
+        }
+
+        // 5. 计算段布局
+        int numSections = this.sections.size();
+        int headersRawSize = PELinker.DOS_HEADER_SIZE + PELinker.PE_SIGNATURE_SIZE +
+            PELinker.COFF_HEADER_SIZE + PELinker.OPTIONAL_HEADER_SIZE +
+            PELinker.SECTION_HEADER_SIZE * numSections;
+        int sizeOfHeaders = this.alignUp(headersRawSize, PELinker.FILE_ALIGNMENT);
+
+        Array<int> sectionRVAs = new Array<int>();
+        Array<int> sectionRawOffsets = new Array<int>();
+        Array<int> sectionSizes = new Array<int>();
+
+        int currentRVA = this.alignUp(sizeOfHeaders, PELinker.SECTION_ALIGNMENT);
+        int currentRaw = sizeOfHeaders;
+
+        for (int si = 0; si < this.sections.size(); si++) {
+            PEMergedSection sec = this.sections.get(si);
+            sectionRVAs.add(currentRVA);
+            sectionRawOffsets.add(currentRaw);
+
+            int rawSize = this.alignUp(sec.data.size(), PELinker.FILE_ALIGNMENT);
+            sectionSizes.add(rawSize);
+
+            currentRVA = this.alignUp(currentRVA + this.alignUp(sec.data.size(), PELinker.SECTION_ALIGNMENT), PELinker.SECTION_ALIGNMENT);
+            currentRaw = currentRaw + rawSize;
+        }
+
+        int sizeOfImage = this.alignUp(currentRVA, PELinker.SECTION_ALIGNMENT);
+
+        // 6. 计算 IDT RVA 和 IAT RVAs（在段布局确定后）
+        if (idataSecIdx >= 0) {
+            int idataRVA = sectionRVAs.get(idataSecIdx);
+            // IDT 在 .idata 段的偏移 0 处
+            idtRVA = idataRVA;
+            // IDT size: (imports + 1) * 20
+            idtSize = (imports.size() + 1) * 20;
+
+            // 计算 IAT RVAs
+            for (int i = 0; i < imports.size(); i++) {
+                PEImportInfo imp = imports.get(i);
+                // IAT 偏移: ILT 区域之后: sum of (imp.functions + 1) * 8
+                int iatOff = 0;
+                for (int ii = 0; ii <= i; ii++) {
+                    PEImportInfo imp2 = imports.get(ii);
+                    iatOff = iatOff + (imp2.functions.size() + 1) * 8;
+                }
+                for (int j = 0; j < imp.functions.size(); j++) {
+                    iatRVAs.add(idataRVA + iatOff + j * 8);
+                }
+            }
+        }
+
+        // 7. 回填 import thunks
+        if (this.undefinedSymbols.size() > 0 && iatRVAs.size() > 0) {
+            this.patchImportThunks(sectionRVAs, iatRVAs, this.undefinedSymbols);
+        }
+
+        // 8. 查找入口点
+        int entryRVA = 0;
+        for (int si = 0; si < this.sections.size(); si++) {
+            PEMergedSection sec = this.sections.get(si);
+            int off = sec.findSymbol(this.entryPoint);
+            if (off >= 0) {
+                int secRVA = sectionRVAs.get(si);
+                entryRVA = secRVA + off;
+            }
+        }
+
+        // 9. 构建 PE 文件
+        Array<int> buf = new Array<int>();
+
+        // DOS 头
+        this.writeWord(buf, 23117); // MZ
+        for (int i = 2; i < 60; i++) {
+            buf.add(0);
+        }
+        this.writeDWord(buf, PELinker.DOS_HEADER_SIZE); // e_lfanew
+
+        // PE 签名
+        buf.add(80);  // P
+        buf.add(69);  // E
+        buf.add(0);
+        buf.add(0);
+
+        // COFF 头
+        this.writeWord(buf, 34404); // Machine: AMD64
+        this.writeWord(buf, numSections);
+        this.writeDWord(buf, 0); // TimeDateStamp
+        this.writeDWord(buf, 0); // PointerToSymbolTable
+        this.writeDWord(buf, 0); // NumberOfSymbols
+        this.writeWord(buf, PELinker.OPTIONAL_HEADER_SIZE);
+        this.writeWord(buf, 34); // Characteristics: EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+
+        // 可选头 (PE32+)
+        this.writeWord(buf, 523); // Magic: PE32+ (0x020B)
+        buf.add(14); // MajorLinkerVersion
+        buf.add(0);  // MinorLinkerVersion
+        this.writeDWord(buf, 0); // SizeOfCode
+        this.writeDWord(buf, 0); // SizeOfInitializedData
+        this.writeDWord(buf, 0); // SizeOfUninitializedData
+        this.writeDWord(buf, entryRVA); // AddressOfEntryPoint
+        this.writeDWord(buf, sectionRVAs.size() > 0 ? sectionRVAs.get(0) : 0); // BaseOfCode
+
+        // PE32+ 特有字段
+        this.writeQWord(buf, PELinker.IMAGE_BASE);
+        this.writeDWord(buf, PELinker.SECTION_ALIGNMENT);
+        this.writeDWord(buf, PELinker.FILE_ALIGNMENT);
+        this.writeWord(buf, 6);  // MajorOperatingSystemVersion
+        this.writeWord(buf, 0);  // MinorOperatingSystemVersion
+        this.writeWord(buf, 0);  // MajorImageVersion
+        this.writeWord(buf, 0);  // MinorImageVersion
+        this.writeWord(buf, 6);  // MajorSubsystemVersion
+        this.writeWord(buf, 0);  // MinorSubsystemVersion
+        this.writeDWord(buf, 0); // Win32VersionValue
+        this.writeDWord(buf, sizeOfImage);
+        this.writeDWord(buf, sizeOfHeaders);
+        this.writeDWord(buf, 0); // CheckSum
+        this.writeWord(buf, 3);  // Subsystem: CONSOLE
+        this.writeWord(buf, 0);  // DllCharacteristics
+        this.writeQWord(buf, 1048576);  // SizeOfStackReserve
+        this.writeQWord(buf, 4096);     // SizeOfStackCommit
+        this.writeQWord(buf, 1048576);  // SizeOfHeapReserve
+        this.writeQWord(buf, 4096);     // SizeOfHeapCommit
+        this.writeDWord(buf, 0);  // LoaderFlags
+        this.writeDWord(buf, 16); // NumberOfRvaAndSizes
+
+        // 数据目录 (16 个条目，每个 8 字节)
+        // [0]: Export Directory - 0
+        this.writeDWord(buf, 0); this.writeDWord(buf, 0);
+        // [1]: Import Directory - 填充 IDT RVA 和 Size
+        if (imports.size() > 0) {
+            this.writeDWord(buf, idtRVA);
+            this.writeDWord(buf, idtSize);
+        } else {
+            this.writeDWord(buf, 0);
+            this.writeDWord(buf, 0);
+        }
+        // [2]..[15]: 其余数据目录 - 0
+        for (int i = 2; i < 16; i++) {
+            this.writeDWord(buf, 0);
+            this.writeDWord(buf, 0);
+        }
+
+        // 段表
+        for (int si = 0; si < this.sections.size(); si++) {
+            PEMergedSection sec = this.sections.get(si);
+            // Name (8 字节)
+            this.writeName(buf, sec.name, 8);
+            // VirtualSize
+            this.writeDWord(buf, sec.data.size());
+            // VirtualAddress
+            this.writeDWord(buf, sectionRVAs.get(si));
+            // SizeOfRawData
+            this.writeDWord(buf, sectionSizes.get(si));
+            // PointerToRawData
+            this.writeDWord(buf, sectionRawOffsets.get(si));
+            // PointerToRelocations
+            this.writeDWord(buf, 0);
+            // PointerToLinenumbers
+            this.writeDWord(buf, 0);
+            // NumberOfRelocations
+            this.writeWord(buf, 0);
+            // NumberOfLinenumbers
+            this.writeWord(buf, 0);
+            // Characteristics
+            this.writeDWord(buf, sec.characteristics);
+        }
+
+        // 填充到 sizeOfHeaders
+        while (buf.size() < sizeOfHeaders) {
+            buf.add(0);
+        }
+
+        // 段数据
+        for (int si = 0; si < this.sections.size(); si++) {
+            PEMergedSection sec = this.sections.get(si);
+            for (int bi = 0; bi < sec.data.size(); bi++) {
+                int byteVal = sec.data.get(bi);
+                buf.add(byteVal & 255);
+            }
+            // 填充到 FILE_ALIGNMENT
+            int rawSize = this.alignUp(sec.data.size(), PELinker.FILE_ALIGNMENT);
+            int rawEnd = sectionRawOffsets.get(si) + rawSize;
+            while (buf.size() < rawEnd) {
+                buf.add(0);
+            }
+        }
+
+        return buf;
+    }
+
+    // ---- 生成 .idata 段 ----
+
+    private void buildIdataSection(Array<PEImportInfo> imports) {
+        PEMergedSection idata = this.findOrCreateSection(".idata",
+            COFF64.SCN_CNT_IDATA | COFF64.SCN_MEM_READ | COFF64.SCN_MEM_WRITE);
+
+        // 简化的导入表结构
+        // IDT (Import Directory Table): 每个 DLL 20 字节 + 空终止项
+        int idtSize = (imports.size() + 1) * 20;
+
+        // ILT (Import Lookup Table): 每个 DLL 的函数指针数组
+        // IAT (Import Address Table): 同 ILT
+        // Hint/Name 表: 每个函数 2 字节 hint + 名称 + null
+        // DLL 名称
+
+        // 先写入 IDT 占位
+        for (int i = 0; i < idtSize; i++) {
+            idata.data.add(0);
+        }
+
+        // 记录各部分偏移
+        Array<int> iltOffsets = new Array<int>();
+        Array<int> iatOffsets = new Array<int>();
+        Array<int> hintNameOffsets = new Array<int>();
+        Array<int> dllNameOffsets = new Array<int>();
+
+        int currentOffset = idata.data.size();
+
+        // ILT 偏移
+        for (int i = 0; i < imports.size(); i++) {
+            PEImportInfo imp = imports.get(i);
+            iltOffsets.add(currentOffset);
+            currentOffset = currentOffset + (imp.functions.size() + 1) * 8;
+        }
+
+        // IAT 偏移
+        int iatStart = currentOffset;
+        for (int i = 0; i < imports.size(); i++) {
+            PEImportInfo imp = imports.get(i);
+            iatOffsets.add(currentOffset);
+            currentOffset = currentOffset + (imp.functions.size() + 1) * 8;
+        }
+
+        // Hint/Name 表偏移
+        for (int i = 0; i < imports.size(); i++) {
+            PEImportInfo imp = imports.get(i);
+            for (int j = 0; j < imp.functions.size(); j++) {
+                String funcName = imp.functions.get(j);
+                hintNameOffsets.add(currentOffset);
+                currentOffset = currentOffset + 2 + funcName.length() + 1;
+            }
+        }
+
+        // DLL 名称偏移
+        for (int i = 0; i < imports.size(); i++) {
+            PEImportInfo imp = imports.get(i);
+            String impDllName = imp.dllName;
+            dllNameOffsets.add(currentOffset);
+            currentOffset = currentOffset + impDllName.length() + 1;
+        }
+
+        // 填充 ILT + IAT + Hint/Name + DLL 名称
+        while (idata.data.size() < currentOffset) {
+            idata.data.add(0);
+        }
+
+        // 写入 IDT
+        int hintIdx = 0;
+        for (int i = 0; i < imports.size(); i++) {
+            int idtOff = i * 20;
+            // OriginalFirstThunk (ILT RVA) - 需要运行时计算，这里用偏移
+            this.writeDWordAt(idata.data, idtOff, iltOffsets.get(i));
+            // Name (DLL name RVA)
+            this.writeDWordAt(idata.data, idtOff + 12, dllNameOffsets.get(i));
+            // FirstThunk (IAT RVA)
+            this.writeDWordAt(idata.data, idtOff + 16, iatOffsets.get(i));
+        }
+
+        // 写入 ILT 和 IAT
+        hintIdx = 0;
+        for (int i = 0; i < imports.size(); i++) {
+            PEImportInfo imp = imports.get(i);
+            int iltOff = iltOffsets.get(i);
+            int iatOff = iatOffsets.get(i);
+            for (int j = 0; j < imp.functions.size(); j++) {
+                int hintOff = hintNameOffsets.get(hintIdx);
+                // ILT entry: 指向 Hint/Name
+                this.writeDWordAt(idata.data, iltOff + j * 8, hintOff);
+                this.writeDWordAt(idata.data, iltOff + j * 8 + 4, 0);
+                // IAT entry: 同 ILT
+                this.writeDWordAt(idata.data, iatOff + j * 8, hintOff);
+                this.writeDWordAt(idata.data, iatOff + j * 8 + 4, 0);
+                hintIdx = hintIdx + 1;
+            }
+        }
+
+        // 写入 Hint/Name 表
+        hintIdx = 0;
+        for (int i = 0; i < imports.size(); i++) {
+            PEImportInfo imp = imports.get(i);
+            for (int j = 0; j < imp.functions.size(); j++) {
+                int off = hintNameOffsets.get(hintIdx);
+                // Hint = 0
+                idata.data.set(off, 0);
+                idata.data.set(off + 1, 0);
+                // Function name
+                String funcName = imp.functions.get(j);
+                for (int ci = 0; ci < funcName.length(); ci++) {
+                    idata.data.set(off + 2 + ci, (int)funcName.charAt(ci));
+                }
+                idata.data.set(off + 2 + funcName.length(), 0);
+                hintIdx = hintIdx + 1;
+            }
+        }
+
+        // 写入 DLL 名称
+        for (int i = 0; i < imports.size(); i++) {
+            PEImportInfo imp = imports.get(i);
+            String dllName = imp.dllName;
+            int off = dllNameOffsets.get(i);
+            for (int ci = 0; ci < dllName.length(); ci++) {
+                idata.data.set(off + ci, (int)dllName.charAt(ci));
+            }
+            idata.data.set(off + dllName.length(), 0);
+        }
+    }
+
+    // ---- 辅助方法 ----
+
+    private int alignUp(int value, int alignment) {
+        return ((value + alignment - 1) / alignment) * alignment;
+    }
+
+    private void writeWord(Array<int> buf, int w) {
+        buf.add(w & 255);
+        buf.add((w >> 8) & 255);
+    }
+
+    private void writeDWord(Array<int> buf, int d) {
+        buf.add(d & 255);
+        buf.add((d >> 8) & 255);
+        buf.add((d >> 16) & 255);
+        buf.add((d >> 24) & 255);
+    }
+
+    private void writeQWord(Array<int> buf, long q) {
+        this.writeDWord(buf, (int)q);
+        this.writeDWord(buf, (int)(q >> 32));
+    }
+
+    private void writeName(Array<int> buf, String name, int maxLen) {
+        for (int i = 0; i < name.length() && i < maxLen; i++) {
+            buf.add((int)name.charAt(i));
+        }
+        for (int i = name.length(); i < maxLen; i++) {
+            buf.add(0);
+        }
+    }
+
+    private void writeDWordAt(Array<int> data, int offset, int value) {
+        if (offset + 3 < data.size()) {
+            data.set(offset, value & 255);
+            data.set(offset + 1, (value >> 8) & 255);
+            data.set(offset + 2, (value >> 16) & 255);
+            data.set(offset + 3, (value >> 24) & 255);
+        }
+    }
+
+    // ---- 调试输出 ----
+
+    public String dump() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("; PE32+ Linker State\n");
+        sb.append("; Entry: " + this.entryPoint + "\n");
+        sb.append("; Sections: " + this.sections.size() + "\n");
+        for (int i = 0; i < this.sections.size(); i++) {
+            PEMergedSection sec = this.sections.get(i);
+            sb.append(";   " + sec.name + ": " + sec.data.size() + " bytes, " + sec.symbolNames.size() + " symbols\n");
+        }
+        sb.append("; Undefined: " + this.undefinedSymbols.size() + "\n");
+        return sb.toString();
+    }
+}

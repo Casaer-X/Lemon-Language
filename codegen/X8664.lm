@@ -1,0 +1,523 @@
+package lemon.codegen;
+
+// ============================================================
+// x86-64 指令编码器
+// 生成 x86-64 机器码字节序列
+// 用于原生代码生成和 JIT 编译
+//
+// 寄存器编码 (ModR/M reg field):
+//   RAX=0, RCX=1, RDX=2, RBX=3, RSP=4, RBP=5, RSI=6, RDI=7
+//   R8=0, R9=1, R10=2, R11=3, R12=4, R13=5, R14=6, R15=7 (需 REX.B)
+//
+// REX 前缀: 64 | (W<<3) | (R<<2) | (X<<1) | B
+//   W=1: 64位操作, R: reg扩展, X: SIB index扩展, B: rm或SIB base扩展
+// ============================================================
+
+// 寄存器定义
+class Reg {
+    public static int RAX = 0;
+    public static int RCX = 1;
+    public static int RDX = 2;
+    public static int RBX = 3;
+    public static int RSP = 4;
+    public static int RBP = 5;
+    public static int RSI = 6;
+    public static int RDI = 7;
+    public static int R8  = 8;
+    public static int R9  = 9;
+    public static int R10 = 10;
+    public static int R11 = 11;
+    public static int R12 = 12;
+    public static int R13 = 13;
+    public static int R14 = 14;
+    public static int R15 = 15;
+
+    public static bool isExtended(int reg) {
+        return reg >= 8;
+    }
+
+    public static int encode(int reg) {
+        return reg & 7;
+    }
+}
+
+// 待修补跳转
+class PendingPatch {
+    public int patchOffset;  // DWord 偏移在 buffer 中的位置
+    public int targetLabel;  // 目标标签 ID
+
+    public PendingPatch(int patchOffset, int targetLabel) {
+        this.patchOffset = patchOffset;
+        this.targetLabel = targetLabel;
+    }
+}
+
+// x86-64 指令编码器
+class X8664 {
+    private Array<int> buffer;
+    private int pos;
+    private Array<int> labelPositions;
+    private Array<PendingPatch> pendingPatches;
+    private int nextLabel;
+
+    public X8664() {
+        this.buffer = new Array<int>();
+        this.pos = 0;
+        this.labelPositions = new Array<int>();
+        this.pendingPatches = new Array<PendingPatch>();
+        this.nextLabel = 0;
+    }
+
+    public Array<int> getBuffer() {
+        return this.buffer;
+    }
+
+    public int getPosition() {
+        return this.pos;
+    }
+
+    public int size() {
+        return this.pos;
+    }
+
+    // ---- 标签系统 ----
+
+    public int newLabel() {
+        int label = this.nextLabel;
+        this.nextLabel = this.nextLabel + 1;
+        return label;
+    }
+
+    public void bindLabel(int label) {
+        while (this.labelPositions.size() <= label) {
+            this.labelPositions.add(-1);
+        }
+        this.labelPositions.set(label, this.pos);
+    }
+
+    public void patchAll() {
+        for (int i = 0; i < this.pendingPatches.size(); i++) {
+            PendingPatch pp = this.pendingPatches.get(i);
+            int target = -1;
+            if (pp.targetLabel < this.labelPositions.size()) {
+                target = this.labelPositions.get(pp.targetLabel);
+            }
+            if (target >= 0 && pp.patchOffset + 3 < this.buffer.size()) {
+                int rel32 = target - (pp.patchOffset + 4);
+                this.buffer.set(pp.patchOffset, rel32 & 255);
+                this.buffer.set(pp.patchOffset + 1, (rel32 >> 8) & 255);
+                this.buffer.set(pp.patchOffset + 2, (rel32 >> 16) & 255);
+                this.buffer.set(pp.patchOffset + 3, (rel32 >> 24) & 255);
+            }
+        }
+        this.pendingPatches.clear();
+    }
+
+    public void resetLabels() {
+        this.labelPositions.clear();
+        this.pendingPatches.clear();
+        this.nextLabel = 0;
+    }
+
+    // ---- 底层字节输出 ----
+
+    private void emitByte(int b) {
+        this.buffer.add(b & 255);
+        this.pos = this.pos + 1;
+    }
+
+    private void emitWord(int w) {
+        this.emitByte(w & 255);
+        this.emitByte((w >> 8) & 255);
+    }
+
+    private void emitDWord(int d) {
+        this.emitByte(d & 255);
+        this.emitByte((d >> 8) & 255);
+        this.emitByte((d >> 16) & 255);
+        this.emitByte((d >> 24) & 255);
+    }
+
+    private void emitQWord(long q) {
+        this.emitDWord((int)q);
+        this.emitDWord((int)(q >> 32));
+    }
+
+    // ---- REX 前缀 ----
+
+    private void emitRex(bool w, int reg, int rm) {
+        int rex = 64;
+        if (w) rex = rex | 8;
+        if (Reg.isExtended(reg)) rex = rex | 4;
+        if (Reg.isExtended(rm)) rex = rex | 1;
+        if (rex != 64 || w) {
+            this.emitByte(rex);
+        }
+    }
+
+    private void emitRexWithSIB(bool w, int reg, int index, int base) {
+        int rex = 64;
+        if (w) rex = rex | 8;
+        if (Reg.isExtended(reg)) rex = rex | 4;
+        if (Reg.isExtended(index)) rex = rex | 2;
+        if (Reg.isExtended(base)) rex = rex | 1;
+        if (rex != 64 || w) {
+            this.emitByte(rex);
+        }
+    }
+
+    // ---- ModR/M 编码 ----
+
+    // ModR/M: mod(2) | reg(3) | rm(3)
+    private void emitModRM(int mod, int reg, int rm) {
+        int byte_ = ((mod & 3) << 6) | ((Reg.encode(reg) & 7) << 3) | (Reg.encode(rm) & 7);
+        this.emitByte(byte_);
+    }
+
+    // SIB: scale(2) | index(3) | base(3)
+    private void emitSIB(int scale, int index, int base) {
+        int byte_ = ((scale & 3) << 6) | ((Reg.encode(index) & 7) << 3) | (Reg.encode(base) & 7);
+        this.emitByte(byte_);
+    }
+
+    // ---- 数据移动指令 ----
+
+    // MOV reg, imm32 (sign-extended to 64-bit)
+    public void emitMovRegImm32(int reg, int imm32) {
+        this.emitRex(true, reg, 0);
+        this.emitByte(199);
+        this.emitModRM(3, 0, reg);
+        this.emitDWord(imm32);
+    }
+
+    // MOV reg, imm64
+    public void emitMovRegImm64(int reg, long imm64) {
+        this.emitRex(true, 0, reg);
+        this.emitByte(184 + Reg.encode(reg));
+        this.emitQWord(imm64);
+    }
+
+    // MOV reg1, reg2 (64-bit)
+    public void emitMovRegReg(int dst, int src) {
+        this.emitRex(true, src, dst);
+        this.emitByte(137);
+        this.emitModRM(3, src, dst);
+    }
+
+    // MOV [reg+offset], reg
+    public void emitMovMemReg(int base, int offset, int src) {
+        this.emitRex(true, src, base);
+        this.emitByte(137);
+        if (offset == 0 && Reg.encode(base) != 5) {
+            this.emitModRM(0, src, base);
+        } else if (offset >= -128 && offset <= 127) {
+            this.emitModRM(1, src, base);
+            this.emitByte(offset);
+        } else {
+            this.emitModRM(2, src, base);
+            this.emitDWord(offset);
+        }
+    }
+
+    // MOV reg, [reg+offset]
+    public void emitMovRegMem(int dst, int base, int offset) {
+        this.emitRex(true, dst, base);
+        this.emitByte(139);
+        if (offset == 0 && Reg.encode(base) != 5) {
+            this.emitModRM(0, dst, base);
+        } else if (offset >= -128 && offset <= 127) {
+            this.emitModRM(1, dst, base);
+            this.emitByte(offset);
+        } else {
+            this.emitModRM(2, dst, base);
+            this.emitDWord(offset);
+        }
+    }
+
+    // LEA reg, [rip+offset]
+    public void emitLeaRip(int dst, int offset) {
+        this.emitRex(true, dst, 0);
+        this.emitByte(141);
+        this.emitModRM(0, dst, 5);
+        this.emitDWord(offset);
+    }
+
+    // ---- 算术指令 ----
+
+    // ADD reg, imm32
+    public void emitAddRegImm32(int reg, int imm32) {
+        if (imm32 >= -128 && imm32 <= 127) {
+            this.emitRex(true, 0, reg);
+            this.emitByte(131);
+            this.emitModRM(3, 0, reg);
+            this.emitByte(imm32);
+        } else {
+            this.emitRex(true, 0, reg);
+            this.emitByte(129);
+            this.emitModRM(3, 0, reg);
+            this.emitDWord(imm32);
+        }
+    }
+
+    // ADD reg1, reg2
+    public void emitAddRegReg(int dst, int src) {
+        this.emitRex(true, src, dst);
+        this.emitByte(1);
+        this.emitModRM(3, src, dst);
+    }
+
+    // SUB reg, imm32
+    public void emitSubRegImm32(int reg, int imm32) {
+        if (imm32 >= -128 && imm32 <= 127) {
+            this.emitRex(true, 0, reg);
+            this.emitByte(131);
+            this.emitModRM(3, 5, reg);
+            this.emitByte(imm32);
+        } else {
+            this.emitRex(true, 0, reg);
+            this.emitByte(129);
+            this.emitModRM(3, 5, reg);
+            this.emitDWord(imm32);
+        }
+    }
+
+    // SUB reg1, reg2
+    public void emitSubRegReg(int dst, int src) {
+        this.emitRex(true, src, dst);
+        this.emitByte(41);
+        this.emitModRM(3, src, dst);
+    }
+
+    // IMUL reg1, reg2
+    public void emitImulRegReg(int dst, int src) {
+        this.emitRex(true, dst, src);
+        this.emitByte(15);
+        this.emitByte(175);
+        this.emitModRM(3, dst, src);
+    }
+
+    // IDIV reg
+    public void emitIdivReg(int reg) {
+        this.emitRex(true, 0, reg);
+        this.emitByte(247);
+        this.emitModRM(3, 7, reg);
+    }
+
+    // CQO (sign-extend RAX to RDX:RAX)
+    public void emitCqo() {
+        this.emitByte(72);
+        this.emitByte(153);
+    }
+
+    // NEG reg
+    public void emitNegReg(int reg) {
+        this.emitRex(true, 0, reg);
+        this.emitByte(247);
+        this.emitModRM(3, 3, reg);
+    }
+
+    // NOT reg
+    public void emitNotReg(int reg) {
+        this.emitRex(true, 0, reg);
+        this.emitByte(247);
+        this.emitModRM(3, 2, reg);
+    }
+
+    // ---- 位运算 ----
+
+    // AND reg1, reg2
+    public void emitAndRegReg(int dst, int src) {
+        this.emitRex(true, src, dst);
+        this.emitByte(33);
+        this.emitModRM(3, src, dst);
+    }
+
+    // OR reg1, reg2
+    public void emitOrRegReg(int dst, int src) {
+        this.emitRex(true, src, dst);
+        this.emitByte(9);
+        this.emitModRM(3, src, dst);
+    }
+
+    // XOR reg1, reg2
+    public void emitXorRegReg(int dst, int src) {
+        this.emitRex(true, src, dst);
+        this.emitByte(49);
+        this.emitModRM(3, src, dst);
+    }
+
+    // SHL reg, cl
+    public void emitShlRegCl(int reg) {
+        this.emitRex(true, 0, reg);
+        this.emitByte(211);
+        this.emitModRM(3, 4, reg);
+    }
+
+    // SHR reg, cl (arithmetic)
+    public void emitSarRegCl(int reg) {
+        this.emitRex(true, 0, reg);
+        this.emitByte(211);
+        this.emitModRM(3, 7, reg);
+    }
+
+    // ---- 比较和测试 ----
+
+    // CMP reg1, reg2
+    public void emitCmpRegReg(int reg1, int reg2) {
+        this.emitRex(true, reg2, reg1);
+        this.emitByte(57);
+        this.emitModRM(3, reg2, reg1);
+    }
+
+    // CMP reg, imm32
+    public void emitCmpRegImm32(int reg, int imm32) {
+        this.emitRex(true, 0, reg);
+        if (imm32 >= -128 && imm32 <= 127) {
+            this.emitByte(131);
+            this.emitModRM(3, 7, reg);
+            this.emitByte(imm32);
+        } else {
+            this.emitByte(129);
+            this.emitModRM(3, 7, reg);
+            this.emitDWord(imm32);
+        }
+    }
+
+    // TEST reg, reg
+    public void emitTestRegReg(int reg1, int reg2) {
+        this.emitRex(true, reg2, reg1);
+        this.emitByte(133);
+        this.emitModRM(3, reg2, reg1);
+    }
+
+    // ---- 条件设置 ----
+
+    // SETcc reg (set byte based on condition)
+    public void emitSetCC(int cc, int reg) {
+        this.emitByte(15);
+        this.emitByte(144 + cc);
+        this.emitModRM(3, 0, reg);
+    }
+
+    // MOVZX reg, r/m8
+    public void emitMovzxByte(int dst, int src) {
+        this.emitRex(true, dst, src);
+        this.emitByte(15);
+        this.emitByte(182);
+        this.emitModRM(3, dst, src);
+    }
+
+    // 条件码
+    public static int CC_E  = 0;  // equal/zero
+    public static int CC_NE = 1;  // not equal/not zero
+    public static int CC_L  = 12; // less (signed)
+    public static int CC_GE = 13; // greater or equal (signed)
+    public static int CC_LE = 14; // less or equal (signed)
+    public static int CC_G  = 15; // greater (signed)
+    public static int CC_B  = 2;  // below (unsigned)
+    public static int CC_AE = 3;  // above or equal (unsigned)
+
+    // ---- 跳转指令 ----
+
+    // JMP rel32 (直接偏移)
+    public void emitJmp(int offset) {
+        this.emitByte(233);
+        this.emitDWord(offset);
+    }
+
+    // JMP label (带修补)
+    public void emitJmpLabel(int label) {
+        this.emitByte(233);
+        int patchPos = this.pos;
+        this.emitDWord(0); // 占位
+        this.pendingPatches.add(new PendingPatch(patchPos, label));
+    }
+
+    // Jcc rel32 (直接偏移)
+    public void emitJcc(int cc, int offset) {
+        this.emitByte(15);
+        this.emitByte(128 + cc);
+        this.emitDWord(offset);
+    }
+
+    // Jcc label (带修补)
+    public void emitJccLabel(int cc, int label) {
+        this.emitByte(15);
+        this.emitByte(128 + cc);
+        int patchPos = this.pos;
+        this.emitDWord(0); // 占位
+        this.pendingPatches.add(new PendingPatch(patchPos, label));
+    }
+
+    // ---- 函数调用 ----
+
+    // CALL rel32
+    public void emitCall(int offset) {
+        this.emitByte(232);
+        this.emitDWord(offset);
+    }
+
+    // CALL reg (indirect)
+    public void emitCallReg(int reg) {
+        this.emitByte(255);
+        this.emitModRM(3, 2, reg);
+    }
+
+    // RET
+    public void emitRet() {
+        this.emitByte(195);
+    }
+
+    // ---- 栈操作 ----
+
+    // PUSH reg
+    public void emitPushReg(int reg) {
+        if (Reg.isExtended(reg)) {
+            this.emitByte(65);
+        }
+        this.emitByte(80 + Reg.encode(reg));
+    }
+
+    // POP reg
+    public void emitPopReg(int reg) {
+        if (Reg.isExtended(reg)) {
+            this.emitByte(65);
+        }
+        this.emitByte(88 + Reg.encode(reg));
+    }
+
+    // SUB RSP, imm32
+    public void emitSubRsp(int imm32) {
+        this.emitSubRegImm32(Reg.RSP, imm32);
+    }
+
+    // ADD RSP, imm32
+    public void emitAddRsp(int imm32) {
+        this.emitAddRegImm32(Reg.RSP, imm32);
+    }
+
+    // ---- NOP ----
+
+    public void emitNop() {
+        this.emitByte(144);
+    }
+
+    // ---- 调试输出 ----
+
+    public String dump() {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < this.pos; i++) {
+            if (i > 0) sb.append(" ");
+            int b = this.buffer.get(i);
+            int hi = b / 16;
+            int lo = b % 16;
+            String hex = "";
+            if (hi < 10) hex = hex + hi;
+            else hex = hex + (char)(hi - 10 + 97);
+            if (lo < 10) hex = hex + lo;
+            else hex = hex + (char)(lo - 10 + 97);
+            sb.append(hex);
+        }
+        return sb.toString();
+    }
+}

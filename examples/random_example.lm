@@ -1,0 +1,96 @@
+// @compile target=exe
+// Lemon 示例 - 随机数生成
+
+package examples;
+
+public class RandomExample {
+    public static void main(String[] args) {
+        System.printf("=== 随机数生成示例 ===\n\n");
+
+        // 1. 随机整数
+        System.printf("1. 随机整数 (0-99):\n");
+        for (int i = 0; i < 10; i++) {
+            int r = System.rand() % 100;
+            System.printf("   %d", r);
+        }
+        System.printf("\n\n");
+
+        // 2. 指定范围的随机整数
+        System.printf("2. 随机整数 (10-20):\n");
+        for (int i = 0; i < 10; i++) {
+            int r = 10 + (System.rand() % 11);
+            System.printf("   %d", r);
+        }
+        System.printf("\n\n");
+
+        // 3. 模拟掷骰子
+        System.printf("3. 模拟掷骰子 (100次):\n");
+        int counts[] = {0, 0, 0, 0, 0, 0, 0};
+        for (int i = 0; i < 100; i++) {
+            int roll = 1 + (System.rand() % 6);
+            counts[roll] = counts[roll] + 1;
+        }
+        int dice = 1;
+        while (dice <= 6) {
+            System.printf("   点数 %d: %d 次\n", dice, counts[dice]);
+            dice = dice + 1;
+        }
+        System.printf("\n");
+
+        // 4. 从数组中随机选择
+        System.printf("4. 从数组中随机选择:\n");
+        Array<String> fruits = new Array();
+        fruits.add("Apple");
+        fruits.add("Banana");
+        fruits.add("Cherry");
+        fruits.add("Date");
+        fruits.add("Elderberry");
+        System.printf("   数组: [Apple, Banana, Cherry, Date, Elderberry]\n");
+        System.printf("   随机选择: ");
+        for (int i = 0; i < 5; i++) {
+            int idx = System.rand() % fruits.size();
+            System.printf("%s ", fruits.get(idx));
+        }
+        System.printf("\n\n");
+
+        // 5. 随机种子
+        System.printf("5. 使用种子生成可重复的随机序列:\n");
+        System.srand(12345);
+        System.printf("   种子=12345: ");
+        for (int i = 0; i < 5; i++) {
+            System.printf("%d ", System.rand() % 100);
+        }
+        System.printf("\n");
+
+        System.srand(12345);
+        System.printf("   再次种子=12345: ");
+        for (int i = 0; i < 5; i++) {
+            System.printf("%d ", System.rand() % 100);
+        }
+        System.printf("\n\n");
+
+        // 6. 实例化对象
+        System.printf("6. 实例化对象:\n");
+        Random rng = new Random(42);
+        System.printf("   随机数生成器 (seed=42): ");
+        for (int i = 0; i < 5; i++) {
+            System.printf("%d ", rng.nextInt(100));
+        }
+        System.printf("\n\n");
+
+        System.printf("=== 示例结束 ===\n");
+    }
+}
+
+public class Random {
+    private long seed;
+
+    public Random(long seed) {
+        this.seed = seed;
+    }
+
+    public int nextInt(int max) {
+        this.seed = (this.seed * 1103515245 + 12345) & 2147483647;
+        return (int)(this.seed % max);
+    }
+}

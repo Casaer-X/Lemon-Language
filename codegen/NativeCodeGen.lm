@@ -1,0 +1,788 @@
+package lemon.codegen;
+
+import lemon.parser.AST;
+
+// ============================================================
+// 原生代码生成器
+// 将 AST 编译为 x86-64 机器码
+// 使用 X8664 指令编码器
+// Windows x64 调用约定
+//
+// 输出格式：包含函数名和机器码字节的 NativeModule
+// 后续由 COFF64 包装为 .obj 文件
+// ============================================================
+
+// 原生函数：名称 + 机器码字节
+class NativeFunction {
+    public String name;
+    public Array<int> code;
+    public int localSize;
+    public int paramCount;
+    public Array<int> callOffsets;   // CALL 指令在 code 中的偏移
+    public Array<String> callNames;  // CALL 目标函数名
+
+    public NativeFunction(String name) {
+        this.name = name;
+        this.code = new Array<int>();
+        this.localSize = 0;
+        this.paramCount = 0;
+        this.callOffsets = new Array<int>();
+        this.callNames = new Array<String>();
+    }
+}
+
+// 原生数据段条目
+class NativeData {
+    public String name;
+    public Array<int> bytes;
+    public bool isString;
+
+    public NativeData(String name) {
+        this.name = name;
+        this.bytes = new Array<int>();
+        this.isString = false;
+    }
+}
+
+// 原生模块
+class NativeModule {
+    public Array<NativeFunction> functions;
+    public Array<NativeData> dataEntries;
+    public Array<String> externNames;
+    public String mainFuncName;
+
+    public NativeModule() {
+        this.functions = new Array<NativeFunction>();
+        this.dataEntries = new Array<NativeData>();
+        this.externNames = new Array<String>();
+        this.mainFuncName = null;
+    }
+
+    public void addExtern(String name) {
+        for (int i = 0; i < this.externNames.size(); i++) {
+            String extName = this.externNames.get(i);
+            if (extName.equals(name)) return;
+        }
+        this.externNames.add(name);
+    }
+}
+
+// 原生代码生成器
+class NativeCodeGen {
+    private NativeModule module;
+    private X8664 encoder;
+    private NativeFunction currentFunc;
+    private String currentClass;
+    private Map<String, int> varStackOffsets;
+    private int stackOffset;
+    private Map<String, int> classFieldOffsets;
+    private Map<String, int> classSizes;
+    private int stringCounter;
+
+
+    public NativeCodeGen() {
+        this.module = new NativeModule();
+        this.encoder = new X8664();
+        this.currentFunc = null;
+        this.currentClass = null;
+        this.varStackOffsets = new Map<String, int>();
+        this.stackOffset = 0;
+        this.classFieldOffsets = new Map<String, int>();
+        this.classSizes = new Map<String, int>();
+        this.stringCounter = 0;
+    }
+
+    // ---- 主入口 ----
+
+    public NativeModule generate(Program program) {
+        // 收集类信息
+        this.collectClassInfo(program);
+        // 声明外部函数
+        this.declareExterns();
+        // 编译所有声明
+        for (int i = 0; i < program.declarations.size(); i++) {
+            Declaration decl = program.declarations.get(i);
+            if (decl.kind == DeclKind.Class) {
+                this.compileClass(decl.classDecl);
+            } else if (decl.kind == DeclKind.Function) {
+                this.compileFunction(decl.functionDecl);
+            }
+        }
+        // 生成 main 入口
+        this.emitMainEntry(program);
+        return this.module;
+    }
+
+    // ---- 信息收集 ----
+
+    private void collectClassInfo(Program program) {
+        for (int i = 0; i < program.declarations.size(); i++) {
+            Declaration decl = program.declarations.get(i);
+            if (decl.kind == DeclKind.Class) {
+                ClassDecl class_ = decl.classDecl;
+                int offset = 0;
+                for (int mi = 0; mi < class_.members.size(); mi++) {
+                    ClassMember member = class_.members.get(mi);
+                    if (member.kind == ClassMemberKind.Field) {
+                        VarDecl field = member.field;
+                        this.classFieldOffsets.put(class_.name + "." + field.name, offset);
+                        offset = offset + 8; // 所有字段 8 字节对齐
+                    }
+                }
+                this.classSizes.put(class_.name, offset);
+            }
+        }
+    }
+
+    private void declareExterns() {
+        Array<String> names = new Array<String>();
+        names.add("printf"); names.add("malloc"); names.add("free");
+        names.add("strlen"); names.add("strcpy"); names.add("strdup");
+        names.add("strcmp"); names.add("strstr"); names.add("strcat");
+        names.add("memcpy"); names.add("memset"); names.add("atoi");
+        names.add("atol"); names.add("atof"); names.add("sprintf"); names.add("exit");
+        names.add("String_length"); names.add("String_indexOf");
+        names.add("String_substring"); names.add("String_substring_from");
+        names.add("String_substring_from_to"); names.add("String_trim");
+        names.add("String_toUpperCase"); names.add("String_toLowerCase");
+        names.add("String_replace"); names.add("String_concat");
+        names.add("String_equals"); names.add("String_startsWith");
+        names.add("String_endsWith"); names.add("String_contains");
+        names.add("String_compareTo"); names.add("String_lastIndexOf");
+        names.add("String_fromChar"); names.add("String_intToString");
+        names.add("String_longToString"); names.add("String_doubleToString");
+        names.add("String_toInt"); names.add("String_toLong");
+        names.add("String_toDouble");
+        names.add("StringBuilder_new"); names.add("StringBuilder_append");
+        names.add("StringBuilder_appendChar"); names.add("StringBuilder_appendInt");
+        names.add("StringBuilder_appendLong"); names.add("StringBuilder_appendFloat");
+        names.add("StringBuilder_appendDouble"); names.add("StringBuilder_appendBool");
+        names.add("StringBuilder_toString"); names.add("StringBuilder_length");
+        names.add("StringBuilder_free"); names.add("StringBuilder_clear");
+        names.add("LemonArray_new"); names.add("LemonArray_add");
+        names.add("LemonArray_push"); names.add("LemonArray_get");
+        names.add("LemonArray_set"); names.add("LemonArray_size");
+        names.add("LemonArray_removeAt"); names.add("LemonArray_contains");
+        names.add("LemonArray_indexOf"); names.add("LemonArray_free");
+        names.add("LemonMap_new"); names.add("LemonMap_put");
+        names.add("LemonMap_get"); names.add("LemonMap_containsKey");
+        names.add("LemonMap_remove"); names.add("LemonMap_size");
+        names.add("LemonMap_free");
+        names.add("File_readAll"); names.add("File_writeAll");
+        names.add("File_exists"); names.add("File_delete");
+        names.add("File_listDir"); names.add("File_isDir");
+        for (int i = 0; i < names.size(); i++) {
+            this.module.addExtern(names.get(i));
+        }
+    }
+
+    // ---- 类编译 ----
+
+    private void compileClass(ClassDecl class_) {
+        this.currentClass = class_.name;
+        // 构造函数
+        for (int mi = 0; mi < class_.members.size(); mi++) {
+            ClassMember member = class_.members.get(mi);
+            if (member.kind == ClassMemberKind.Constructor) {
+                this.compileConstructor(class_.name, member.constructor);
+            }
+        }
+        // 方法
+        for (int mi = 0; mi < class_.members.size(); mi++) {
+            ClassMember member = class_.members.get(mi);
+            if (member.kind == ClassMemberKind.Method) {
+                this.compileMethod(class_.name, member.method);
+            }
+        }
+        this.currentClass = null;
+    }
+
+    // ---- 构造函数 ----
+
+    private void compileConstructor(String className, ConstructorDecl ctor) {
+        String funcName = className + "_ctor";
+        this.startFunction(funcName, 0);
+
+        // 保存参数到栈
+        this.varStackOffsets = new Map<String, int>();
+        this.varStackOffsets.put("self", -8);
+        this.stackOffset = -16;
+        // self 在 RCX
+        this.encoder.emitMovMemReg(Reg.RBP, -8, Reg.RCX);
+
+        // 分配实例
+        int classSize = 8;
+        if (this.classSizes.containsKey(className)) {
+            classSize = this.classSizes.get(className);
+        }
+        if (classSize < 16) classSize = 16; // 最小 16 字节
+
+        // malloc(classSize)
+        this.encoder.emitMovRegImm32(Reg.RCX, classSize);
+        this.emitCall("malloc");
+        // 保存 self = rax
+        this.encoder.emitMovMemReg(Reg.RBP, -8, Reg.RAX);
+
+        // memset(self, 0, classSize)
+        this.encoder.emitMovRegReg(Reg.RCX, Reg.RAX);
+        this.encoder.emitMovRegImm32(Reg.RDX, 0);
+        this.encoder.emitMovRegImm32(Reg.R8, classSize);
+        this.emitCall("memset");
+
+        // 编译构造函数体
+        this.compileBlock(ctor.body);
+
+        // 返回 self
+        this.encoder.emitMovRegMem(Reg.RAX, Reg.RBP, -8);
+        this.endFunction();
+    }
+
+    // ---- 方法 ----
+
+    private void compileMethod(String className, MethodDecl method) {
+        String funcName = className + "_" + method.name;
+        int paramCount = 0;
+        if (method.params != null) paramCount = method.params.size();
+        this.startFunction(funcName, paramCount);
+
+        this.varStackOffsets = new Map<String, int>();
+        this.varStackOffsets.put("self", -8);
+        this.stackOffset = -16;
+        // self 在 RCX
+        this.encoder.emitMovMemReg(Reg.RBP, -8, Reg.RCX);
+
+        // 保存参数
+        if (method.params != null) {
+            for (int pi = 0; pi < method.params.size(); pi++) {
+                Param param = method.params.get(pi);
+                this.varStackOffsets.put(param.name, this.stackOffset);
+                this.saveArgToStack(pi, this.stackOffset);
+                this.stackOffset = this.stackOffset - 8;
+            }
+        }
+
+        // 编译方法体
+        if (method.body != null) {
+            this.compileBlock(method.body);
+        }
+
+        this.endFunction();
+    }
+
+    // ---- 顶层函数 ----
+
+    private void compileFunction(FunctionDecl func) {
+        int paramCount = 0;
+        if (func.params != null) paramCount = func.params.size();
+        this.startFunction(func.name, paramCount);
+
+        this.varStackOffsets = new Map<String, int>();
+        this.stackOffset = -8;
+
+        if (func.params != null) {
+            for (int pi = 0; pi < func.params.size(); pi++) {
+                Param param = func.params.get(pi);
+                this.varStackOffsets.put(param.name, this.stackOffset);
+                this.saveArgToStack(pi, this.stackOffset);
+                this.stackOffset = this.stackOffset - 8;
+            }
+        }
+
+        if (func.body != null) {
+            this.compileBlock(func.body);
+        }
+
+        this.endFunction();
+    }
+
+    // ---- 函数序言/尾声 ----
+
+    private void startFunction(String name, int paramCount) {
+        this.currentFunc = new NativeFunction(name);
+        this.currentFunc.paramCount = paramCount;
+        this.encoder = new X8664();
+        // push rbp
+        this.encoder.emitPushReg(Reg.RBP);
+        // mov rbp, rsp
+        this.encoder.emitMovRegReg(Reg.RBP, Reg.RSP);
+        // sub rsp, 256 (局部变量空间)
+        this.encoder.emitSubRsp(256);
+        // push rbx, rsi, rdi
+        this.encoder.emitPushReg(Reg.RBX);
+        this.encoder.emitPushReg(Reg.RSI);
+        this.encoder.emitPushReg(Reg.RDI);
+    }
+
+    private void endFunction() {
+        // epilogue
+        this.encoder.emitPopReg(Reg.RDI);
+        this.encoder.emitPopReg(Reg.RSI);
+        this.encoder.emitPopReg(Reg.RBX);
+        this.encoder.emitAddRsp(256);
+        this.encoder.emitMovRegReg(Reg.RSP, Reg.RBP);
+        this.encoder.emitPopReg(Reg.RBP);
+        this.encoder.emitRet();
+
+        // 修补所有跳转偏移
+        this.encoder.patchAll();
+
+        // 保存机器码
+        this.currentFunc.code = this.encoder.getBuffer();
+        this.module.functions.add(this.currentFunc);
+        this.currentFunc = null;
+
+        // 重置编码器供下一个函数使用
+        this.encoder = new X8664();
+    }
+
+    private void saveArgToStack(int argIndex, int stackOff) {
+        int srcReg = 0;
+        if (argIndex == 0) srcReg = Reg.RCX;
+        else if (argIndex == 1) srcReg = Reg.RDX;
+        else if (argIndex == 2) srcReg = Reg.R8;
+        else if (argIndex == 3) srcReg = Reg.R9;
+        else {
+            // 从调用者栈上取参数
+            int stackArgOff = 16 + (argIndex - 4) * 8;
+            this.encoder.emitMovRegMem(Reg.RAX, Reg.RBP, stackArgOff);
+            srcReg = Reg.RAX;
+        }
+        this.encoder.emitMovMemReg(Reg.RBP, stackOff, srcReg);
+    }
+
+    // ---- 语句编译 ----
+
+    private void compileBlock(Block block) {
+        if (block == null || block.statements == null) return;
+        for (int i = 0; i < block.statements.size(); i++) {
+            this.compileStmt(block.statements.get(i));
+        }
+    }
+
+    private void compileStmt(Stmt stmt) {
+        if (stmt.kind == StmtKind.VarDecl) {
+            this.compileVarDecl(stmt.varDecl);
+        } else if (stmt.kind == StmtKind.Return) {
+            if (stmt.returnValue != null) {
+                this.compileExprToReg(stmt.returnValue, Reg.RAX);
+            }
+            // 跳转到函数尾声
+            this.encoder.emitPopReg(Reg.RDI);
+            this.encoder.emitPopReg(Reg.RSI);
+            this.encoder.emitPopReg(Reg.RBX);
+            this.encoder.emitAddRsp(256);
+            this.encoder.emitMovRegReg(Reg.RSP, Reg.RBP);
+            this.encoder.emitPopReg(Reg.RBP);
+            this.encoder.emitRet();
+        } else if (stmt.kind == StmtKind.Expr) {
+            this.compileExprToReg(stmt.expr, Reg.RAX);
+        } else if (stmt.kind == StmtKind.If) {
+            this.compileIf(stmt);
+        } else if (stmt.kind == StmtKind.While) {
+            this.compileWhile(stmt);
+        } else if (stmt.kind == StmtKind.Block) {
+            this.compileBlock(new Block(stmt.statements));
+        }
+    }
+
+    private void compileVarDecl(VarDecl varDecl) {
+        int off = this.stackOffset;
+        this.varStackOffsets.put(varDecl.name, off);
+        this.stackOffset = this.stackOffset - 8;
+        if (varDecl.initializer != null) {
+            this.compileExprToReg(varDecl.initializer, Reg.RAX);
+            this.encoder.emitMovMemReg(Reg.RBP, off, Reg.RAX);
+        }
+    }
+
+    private void compileIf(Stmt stmt) {
+        int elseLabel = this.encoder.newLabel();
+        int endLabel = this.encoder.newLabel();
+        this.compileExprToReg(stmt.condition, Reg.RAX);
+        this.encoder.emitTestRegReg(Reg.RAX, Reg.RAX);
+        if (stmt.elseBranch != null) {
+            this.encoder.emitJccLabel(X8664.CC_E, elseLabel);
+        } else {
+            this.encoder.emitJccLabel(X8664.CC_E, endLabel);
+        }
+        this.compileStmt(stmt.thenBranch);
+        if (stmt.elseBranch != null) {
+            this.encoder.emitJmpLabel(endLabel);
+            this.encoder.bindLabel(elseLabel);
+            this.compileStmt(stmt.elseBranch);
+        }
+        this.encoder.bindLabel(endLabel);
+    }
+
+    private void compileWhile(Stmt stmt) {
+        int startLabel = this.encoder.newLabel();
+        int endLabel = this.encoder.newLabel();
+        this.encoder.bindLabel(startLabel);
+        this.compileExprToReg(stmt.condition, Reg.RAX);
+        this.encoder.emitTestRegReg(Reg.RAX, Reg.RAX);
+        this.encoder.emitJccLabel(X8664.CC_E, endLabel);
+        this.compileStmt(stmt.body);
+        this.encoder.emitJmpLabel(startLabel);
+        this.encoder.bindLabel(endLabel);
+    }
+
+    // ---- 表达式编译 ----
+
+    private void compileExprToReg(Expr expr, int dst) {
+        if (expr.kind == ExprKind.IntegerLiteral) {
+            this.encoder.emitMovRegImm32(dst, (int)expr.longValue);
+        } else if (expr.kind == ExprKind.BoolLiteral) {
+            this.encoder.emitMovRegImm32(dst, expr.boolValue ? 1 : 0);
+        } else if (expr.kind == ExprKind.Null) {
+            this.encoder.emitMovRegImm32(dst, 0);
+        } else if (expr.kind == ExprKind.StringLiteral) {
+            // 字符串字面量通过数据段引用
+            String dataName = this.emitStringData(expr.strValue);
+            // 使用 LEA RIP + 0 占位，后续链接时由 COFF64 重定位解析
+            this.encoder.emitLeaRip(dst, 0);
+        } else if (expr.kind == ExprKind.CharLiteral) {
+            this.encoder.emitMovRegImm32(dst, (int)expr.charValue);
+        } else if (expr.kind == ExprKind.Variable) {
+            int off = 0;
+            if (this.varStackOffsets.containsKey(expr.strValue)) {
+                off = this.varStackOffsets.get(expr.strValue);
+            }
+            this.encoder.emitMovRegMem(dst, Reg.RBP, off);
+        } else if (expr.kind == ExprKind.This) {
+            this.encoder.emitMovRegMem(dst, Reg.RBP, -8);
+        } else if (expr.kind == ExprKind.BinaryOp) {
+            this.compileBinaryOp(expr, dst);
+        } else if (expr.kind == ExprKind.UnaryOp) {
+            this.compileExprToReg(expr.operand, dst);
+            int op = expr.opValue;
+            if (op == UnaryOp.Minus) this.encoder.emitNegReg(dst);
+            else if (op == UnaryOp.Not) {
+                this.encoder.emitXorRegReg(dst, Reg.RAX);
+                this.encoder.emitMovRegImm32(Reg.RAX, 1);
+                // 如果 dst 为 0，RAX=1；否则 RAX=0
+                // 简化：用 test + sete
+                this.encoder.emitTestRegReg(dst, dst);
+                this.encoder.emitSetCC(X8664.CC_E, dst);
+                this.encoder.emitMovzxByte(dst, dst);
+            }
+            else if (op == UnaryOp.BitNot) this.encoder.emitNotReg(dst);
+        } else if (expr.kind == ExprKind.Assignment) {
+            this.compileAssignment(expr, dst);
+        } else if (expr.kind == ExprKind.Call) {
+            this.compileCallExpr(expr, dst);
+        } else if (expr.kind == ExprKind.MethodCall) {
+            this.compileMethodCallExpr(expr, dst);
+        } else if (expr.kind == ExprKind.FieldAccess) {
+            this.compileFieldAccess(expr, dst);
+        } else if (expr.kind == ExprKind.New) {
+            this.compileNewExpr(expr, dst);
+        } else if (expr.kind == ExprKind.ArrayAccess) {
+            this.compileExprToReg(expr.receiver, Reg.RCX);
+            this.compileExprToReg(expr.index, Reg.RDX);
+            this.emitCall("LemonArray_get");
+            this.encoder.emitMovRegReg(dst, Reg.RAX);
+        } else if (expr.kind == ExprKind.Cast) {
+            this.compileExprToReg(expr.operand, dst);
+        } else if (expr.kind == ExprKind.Ternary) {
+            int elseLabel = this.encoder.newLabel();
+            int endLabel = this.encoder.newLabel();
+            this.compileExprToReg(expr.condition, Reg.RAX);
+            this.encoder.emitTestRegReg(Reg.RAX, Reg.RAX);
+            this.encoder.emitJccLabel(X8664.CC_E, elseLabel);
+            this.compileExprToReg(expr.thenExpr, dst);
+            this.encoder.emitJmpLabel(endLabel);
+            this.encoder.bindLabel(elseLabel);
+            this.compileExprToReg(expr.elseExpr, dst);
+            this.encoder.bindLabel(endLabel);
+        }
+    }
+
+    private void compileBinaryOp(Expr expr, int dst) {
+        this.compileExprToReg(expr.left, Reg.RAX);
+        this.encoder.emitPushReg(Reg.RAX);
+        this.compileExprToReg(expr.right, Reg.RCX);
+        this.encoder.emitPopReg(Reg.RAX);
+
+        int op = expr.opValue;
+        if (op == BinaryOp.Add) this.encoder.emitAddRegReg(Reg.RAX, Reg.RCX);
+        else if (op == BinaryOp.Sub) this.encoder.emitSubRegReg(Reg.RAX, Reg.RCX);
+        else if (op == BinaryOp.Mul) this.encoder.emitImulRegReg(Reg.RAX, Reg.RCX);
+        else if (op == BinaryOp.Div) {
+            this.encoder.emitCqo();
+            this.encoder.emitIdivReg(Reg.RCX);
+        } else if (op == BinaryOp.Mod) {
+            this.encoder.emitCqo();
+            this.encoder.emitIdivReg(Reg.RCX);
+            this.encoder.emitMovRegReg(Reg.RAX, Reg.RDX);
+        } else if (op == BinaryOp.Eq) {
+            this.encoder.emitCmpRegReg(Reg.RAX, Reg.RCX);
+            this.encoder.emitSetCC(X8664.CC_E, Reg.RAX);
+            this.encoder.emitMovzxByte(Reg.RAX, Reg.RAX);
+        } else if (op == BinaryOp.Ne) {
+            this.encoder.emitCmpRegReg(Reg.RAX, Reg.RCX);
+            this.encoder.emitSetCC(X8664.CC_NE, Reg.RAX);
+            this.encoder.emitMovzxByte(Reg.RAX, Reg.RAX);
+        } else if (op == BinaryOp.Lt) {
+            this.encoder.emitCmpRegReg(Reg.RAX, Reg.RCX);
+            this.encoder.emitSetCC(X8664.CC_L, Reg.RAX);
+            this.encoder.emitMovzxByte(Reg.RAX, Reg.RAX);
+        } else if (op == BinaryOp.Gt) {
+            this.encoder.emitCmpRegReg(Reg.RAX, Reg.RCX);
+            this.encoder.emitSetCC(X8664.CC_G, Reg.RAX);
+            this.encoder.emitMovzxByte(Reg.RAX, Reg.RAX);
+        } else if (op == BinaryOp.Le) {
+            this.encoder.emitCmpRegReg(Reg.RAX, Reg.RCX);
+            this.encoder.emitSetCC(X8664.CC_LE, Reg.RAX);
+            this.encoder.emitMovzxByte(Reg.RAX, Reg.RAX);
+        } else if (op == BinaryOp.Ge) {
+            this.encoder.emitCmpRegReg(Reg.RAX, Reg.RCX);
+            this.encoder.emitSetCC(X8664.CC_GE, Reg.RAX);
+            this.encoder.emitMovzxByte(Reg.RAX, Reg.RAX);
+        } else if (op == BinaryOp.And) {
+            int falseLabel = this.encoder.newLabel();
+            int endLabel = this.encoder.newLabel();
+            this.encoder.emitTestRegReg(Reg.RAX, Reg.RAX);
+            this.encoder.emitJccLabel(X8664.CC_E, falseLabel);
+            this.encoder.emitTestRegReg(Reg.RCX, Reg.RCX);
+            this.encoder.emitJccLabel(X8664.CC_E, falseLabel);
+            this.encoder.emitMovRegImm32(Reg.RAX, 1);
+            this.encoder.emitJmpLabel(endLabel);
+            this.encoder.bindLabel(falseLabel);
+            this.encoder.emitMovRegImm32(Reg.RAX, 0);
+            this.encoder.bindLabel(endLabel);
+        } else if (op == BinaryOp.Or) {
+            int trueLabel = this.encoder.newLabel();
+            int endLabel = this.encoder.newLabel();
+            this.encoder.emitTestRegReg(Reg.RAX, Reg.RAX);
+            this.encoder.emitJccLabel(X8664.CC_NE, trueLabel);
+            this.encoder.emitTestRegReg(Reg.RCX, Reg.RCX);
+            this.encoder.emitJccLabel(X8664.CC_NE, trueLabel);
+            this.encoder.emitMovRegImm32(Reg.RAX, 0);
+            this.encoder.emitJmpLabel(endLabel);
+            this.encoder.bindLabel(trueLabel);
+            this.encoder.emitMovRegImm32(Reg.RAX, 1);
+            this.encoder.bindLabel(endLabel);
+        } else if (op == BinaryOp.BitAnd) this.encoder.emitAndRegReg(Reg.RAX, Reg.RCX);
+        else if (op == BinaryOp.BitOr) this.encoder.emitOrRegReg(Reg.RAX, Reg.RCX);
+        else if (op == BinaryOp.BitXor) this.encoder.emitXorRegReg(Reg.RAX, Reg.RCX);
+        else if (op == BinaryOp.Shl) {
+            this.encoder.emitMovRegReg(Reg.RCX, Reg.RCX); // CL = shift count
+            this.encoder.emitShlRegCl(Reg.RAX);
+        } else if (op == BinaryOp.Shr) {
+            this.encoder.emitSarRegCl(Reg.RAX);
+        }
+
+        this.encoder.emitMovRegReg(dst, Reg.RAX);
+    }
+
+    private void compileAssignment(Expr expr, int dst) {
+        this.compileExprToReg(expr.value, Reg.RAX);
+        if (expr.target.kind == ExprKind.Variable) {
+            int off = 0;
+            if (this.varStackOffsets.containsKey(expr.target.strValue)) {
+                off = this.varStackOffsets.get(expr.target.strValue);
+            }
+            this.encoder.emitMovMemReg(Reg.RBP, off, Reg.RAX);
+        } else if (expr.target.kind == ExprKind.FieldAccess) {
+            this.compileExprToReg(expr.target.receiver, Reg.RCX);
+            int fieldOff = 0;
+            if (this.currentClass != null) {
+                String key = this.currentClass + "." + expr.target.strValue;
+                if (this.classFieldOffsets.containsKey(key)) {
+                    fieldOff = this.classFieldOffsets.get(key);
+                }
+            }
+            this.encoder.emitMovMemReg(Reg.RCX, fieldOff, Reg.RAX);
+        }
+        this.encoder.emitMovRegReg(dst, Reg.RAX);
+    }
+
+    private void compileCallExpr(Expr expr, int dst) {
+        if (expr.callee.kind == ExprKind.Variable) {
+            String funcName = expr.callee.strValue;
+            this.emitArgs(expr.args);
+            this.emitCall(funcName);
+            this.encoder.emitMovRegReg(dst, Reg.RAX);
+        } else if (expr.callee.kind == ExprKind.FieldAccess) {
+            Expr obj = expr.callee.receiver;
+            String method = expr.callee.strValue;
+            this.compileObjMethodCall(obj, method, expr.args, dst);
+        }
+    }
+
+    private void compileMethodCallExpr(Expr expr, int dst) {
+        this.compileObjMethodCall(expr.receiver, expr.strValue, expr.args, dst);
+    }
+
+    private void compileObjMethodCall(Expr obj, String method, Array<Expr> args, int dst) {
+        // 特殊处理内置类型静态方法
+        if (obj.kind == ExprKind.Variable) {
+            String varName = obj.strValue;
+            if (varName.equals("String") || varName.equals("System") ||
+                varName.equals("File") || varName.equals("Array")) {
+                this.emitArgs(args);
+                this.emitCall(varName + "_" + method);
+                this.encoder.emitMovRegReg(dst, Reg.RAX);
+                return;
+            }
+        }
+
+        // 实例方法：self 在 RCX，其余参数在 RDX/R8/R9/栈
+        this.compileExprToReg(obj, Reg.RCX);
+        this.encoder.emitPushReg(Reg.RCX); // 保存 self
+
+        // 准备参数（从 args[0] 开始）
+        for (int i = 0; i < args.size(); i++) {
+            this.compileExprToReg(args.get(i), Reg.RAX);
+            if (i == 0) this.encoder.emitMovRegReg(Reg.RDX, Reg.RAX);
+            else if (i == 1) this.encoder.emitMovRegReg(Reg.R8, Reg.RAX);
+            else if (i == 2) this.encoder.emitMovRegReg(Reg.R9, Reg.RAX);
+            else this.encoder.emitPushReg(Reg.RAX);
+        }
+
+        this.encoder.emitPopReg(Reg.RCX); // 恢复 self
+
+        // 确定函数名
+        String objClass = this.inferClassFromExpr(obj);
+        String funcName = null;
+        if (objClass != null) {
+            if (objClass.equals("String") || objClass.equals("StringBuilder") ||
+                objClass.equals("LemonArray") || objClass.equals("LemonMap")) {
+                funcName = objClass + "_" + method;
+            } else {
+                funcName = objClass + "_" + method;
+            }
+        } else if (this.currentClass != null) {
+            funcName = this.currentClass + "_" + method;
+        }
+
+        if (funcName != null) {
+            this.emitCall(funcName);
+            this.encoder.emitMovRegReg(dst, Reg.RAX);
+        }
+    }
+
+    private void compileFieldAccess(Expr expr, int dst) {
+        this.compileExprToReg(expr.receiver, Reg.RAX);
+        int fieldOff = 0;
+        if (this.currentClass != null) {
+            String key = this.currentClass + "." + expr.strValue;
+            if (this.classFieldOffsets.containsKey(key)) {
+                fieldOff = this.classFieldOffsets.get(key);
+            }
+        }
+        this.encoder.emitMovRegMem(dst, Reg.RAX, fieldOff);
+    }
+
+    private void compileNewExpr(Expr expr, int dst) {
+        String className = expr.strValue;
+        this.encoder.emitMovRegImm32(Reg.RCX, 0); // self = NULL (ctor will allocate)
+        for (int i = 0; i < expr.args.size(); i++) {
+            this.compileExprToReg(expr.args.get(i), Reg.RAX);
+            if (i == 0) this.encoder.emitMovRegReg(Reg.RDX, Reg.RAX);
+            else if (i == 1) this.encoder.emitMovRegReg(Reg.R8, Reg.RAX);
+            else if (i == 2) this.encoder.emitMovRegReg(Reg.R9, Reg.RAX);
+        }
+        this.emitCall(className + "_ctor");
+        this.encoder.emitMovRegReg(dst, Reg.RAX);
+    }
+
+    // ---- 参数传递 ----
+
+    private void emitArgs(Array<Expr> args) {
+        for (int i = 0; i < args.size(); i++) {
+            this.compileExprToReg(args.get(i), Reg.RAX);
+            if (i == 0) this.encoder.emitMovRegReg(Reg.RCX, Reg.RAX);
+            else if (i == 1) this.encoder.emitMovRegReg(Reg.RDX, Reg.RAX);
+            else if (i == 2) this.encoder.emitMovRegReg(Reg.R8, Reg.RAX);
+            else if (i == 3) this.encoder.emitMovRegReg(Reg.R9, Reg.RAX);
+            else this.encoder.emitPushReg(Reg.RAX);
+        }
+    }
+
+    // ---- 函数调用 ----
+
+    private void emitCall(String funcName) {
+        this.module.addExtern(funcName);
+        // sub rsp, 40 (shadow space + alignment)
+        this.encoder.emitSubRsp(40);
+        // 记录 CALL 指令偏移
+        Array<int> buf = this.encoder.getBuffer();
+        int callOffset = buf.size();
+        // call [rip + offset] - 间接调用，需要重定位
+        this.encoder.emitCall(-4); // -4 addend for CALL RIP-relative REL32 relocation
+        // add rsp, 40
+        this.encoder.emitAddRsp(40);
+        // 记录调用信息
+        if (this.currentFunc != null) {
+            this.currentFunc.callOffsets.add(callOffset);
+            this.currentFunc.callNames.add(funcName);
+        }
+    }
+
+    // ---- Main 入口 ----
+
+    private void emitMainEntry(Program program) {
+        String mainClass = null;
+        for (int i = 0; i < program.declarations.size(); i++) {
+            Declaration decl = program.declarations.get(i);
+            if (decl.kind == DeclKind.Class) {
+                ClassDecl class_ = decl.classDecl;
+                for (int mi = 0; mi < class_.members.size(); mi++) {
+                    ClassMember member = class_.members.get(mi);
+                    if (member.kind == ClassMemberKind.Method && member.method.name.equals("main")) {
+                        mainClass = class_.name;
+                    }
+                }
+            }
+        }
+
+        this.startFunction("main", 2);
+        // 保存 argc(RCX) 和 argv(RDX)
+        this.encoder.emitMovMemReg(Reg.RBP, -8, Reg.RCX);
+        this.encoder.emitMovMemReg(Reg.RBP, -16, Reg.RDX);
+
+        if (mainClass != null) {
+            // 调用 MainClass_main(NULL, NULL)
+            this.encoder.emitMovRegImm32(Reg.RCX, 0);
+            this.encoder.emitMovRegImm32(Reg.RDX, 0);
+            this.emitCall(mainClass + "_main");
+        }
+
+        // return 0
+        this.encoder.emitMovRegImm32(Reg.RAX, 0);
+        this.endFunction();
+        this.module.mainFuncName = "main";
+    }
+
+    // ---- 字符串数据 ----
+
+    private String emitStringData(String value) {
+        String name = "_ndata_" + this.stringCounter;
+        this.stringCounter = this.stringCounter + 1;
+        NativeData data = new NativeData(name);
+        data.isString = true;
+        // 编码字符串为字节
+        for (int i = 0; i < value.length(); i++) {
+            data.bytes.add((int)value.charAt(i));
+        }
+        data.bytes.add(0); // null terminator
+        this.module.dataEntries.add(data);
+        return name;
+    }
+
+    // ---- 辅助方法 ----
+
+    private String inferClassFromExpr(Expr expr) {
+        if (expr == null) return null;
+        if (expr.kind == ExprKind.Variable) {
+            String varName = expr.strValue;
+            // 简化：根据变量名推断
+            if (varName.equals("sb") || varName.equals("builder")) return "StringBuilder";
+            if (varName.equals("arr") || varName.equals("list")) return "LemonArray";
+            if (varName.equals("map")) return "LemonMap";
+        }
+        return null;
+    }
+
+}

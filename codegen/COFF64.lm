@@ -1,0 +1,541 @@
+package lemon.codegen;
+
+import lemon.parser.AST;
+
+// ============================================================
+// COFF64 目标文件生成器
+// 将 NativeModule 输出包装为 COFF64 (.obj) 文件
+// Windows x64 目标文件格式
+//
+// COFF64 文件结构:
+//   1. COFF 文件头 (20 字节)
+//   2. 段表 (每段 40 字节)
+//   3. 段数据
+//   4. 重定位表
+//   5. 符号表 (每符号 18 字节)
+//   6. 字符串表
+// ============================================================
+
+// COFF 符号
+class CoffSymbol {
+    public String name;
+    public int value;
+    public int sectionNumber;  // 1-based, 0=undefined, -1=absolute, -2=debug
+    public int type;           // 0x20 = function, 0x00 = none
+    public int storageClass;   // 2=external, 3=static, 6=function
+    public int numAux;         // 辅助符号数量
+
+    public CoffSymbol(String name, int value, int sectionNumber, int type, int storageClass, int numAux) {
+        this.name = name;
+        this.value = value;
+        this.sectionNumber = sectionNumber;
+        this.type = type;
+        this.storageClass = storageClass;
+        this.numAux = numAux;
+    }
+}
+
+// COFF 重定位
+class CoffReloc {
+    public int virtualAddress;  // 重定位在段内的偏移
+    public int symbolIndex;     // 符号表索引
+    public int type;            // 重定位类型
+
+    public CoffReloc(int virtualAddress, int symbolIndex, int type) {
+        this.virtualAddress = virtualAddress;
+        this.symbolIndex = symbolIndex;
+        this.type = type;
+    }
+}
+
+// COFF 段
+class CoffSection {
+    public String name;
+    public Array<int> data;         // 段数据 (字节)
+    public int characteristics;     // 段属性
+    public Array<CoffReloc> relocations;
+
+    public CoffSection(String name, int characteristics) {
+        this.name = name;
+        this.data = new Array<int>();
+        this.characteristics = characteristics;
+        this.relocations = new Array<CoffReloc>();
+    }
+
+    public void addReloc(int offset, int symbolIndex, int type) {
+        this.relocations.add(new CoffReloc(offset, symbolIndex, type));
+    }
+}
+
+// COFF64 目标文件生成器
+class COFF64 {
+    // 机器类型: AMD64 = 0x8664
+    public static int MACH_AMD64 = 34404;
+
+    // 重定位类型
+    public static int REL_ADDR32NB = 2;   // 32-bit 绝对地址 (无基址)
+    public static int REL_REL32 = 4;       // 32-bit 相对地址
+    public static int REL_REL32_1 = 5;     // REL32 + 1
+    public static int REL_REL32_2 = 6;     // REL32 + 2
+    public static int REL_REL32_3 = 7;     // REL32 + 3
+    public static int REL_REL32_4 = 8;     // REL32 + 4
+    public static int REL_REL32_5 = 9;     // REL32 + 5
+
+    // 符号存储类
+    public static int SYM_EXT = 2;
+    public static int SYM_STATIC = 3;
+    public static int SYM_FUNC = 6;
+    public static int SYM_FILE = 103;
+    public static int SYM_SECTION = 104;
+
+    // 段属性标志
+    public static int SCN_CNT_CODE = 32;
+    public static int SCN_CNT_IDATA = 64;
+    public static int SCN_CNT_UDATA = 128;
+    public static int SCN_LNK_INFO = 512;
+    public static int SCN_MEM_EXEC = 536870912;
+    public static int SCN_MEM_READ = 1073741824;
+    public static int SCN_MEM_WRITE = -2147483648;  // 0x80000000
+
+    // 符号类型
+    public static int SYM_TYPE_NULL = 0;
+    public static int SYM_TYPE_FUNC = 32;  // 0x20
+
+    // 段未定义编号
+    public static int SYM_UNDEF = 0;
+    public static int SYM_ABS = -1;
+    public static int SYM_DEBUG = -2;
+
+    public Array<CoffSection> sections;
+    public Array<CoffSymbol> symbols;
+    public Array<String> stringTable;
+    public int stringTableSize;
+
+    public COFF64() {
+        this.sections = new Array<CoffSection>();
+        this.symbols = new Array<CoffSymbol>();
+        this.stringTable = new Array<String>();
+        this.stringTableSize = 4; // 前 4 字节是字符串表大小
+    }
+
+    // ---- 段操作 ----
+
+    public int addSection(String name, int characteristics) {
+        CoffSection sec = new CoffSection(name, characteristics);
+        this.sections.add(sec);
+        return this.sections.size(); // 1-based 段号
+    }
+
+    public CoffSection getSection(int index) {
+        // index 是 1-based
+        return this.sections.get(index - 1);
+    }
+
+    // ---- 符号操作 ----
+
+    public int addSymbol(String name, int value, int sectionNumber, int type, int storageClass, int numAux) {
+        CoffSymbol sym = new CoffSymbol(name, value, sectionNumber, type, storageClass, numAux);
+        this.symbols.add(sym);
+        return this.symbols.size() - 1; // 0-based 符号索引
+    }
+
+    public int findSymbol(String name) {
+        for (int i = 0; i < this.symbols.size(); i++) {
+            CoffSymbol sym = this.symbols.get(i);
+            String symName = sym.name;
+            if (symName.equals(name)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // ---- 字符串表操作 ----
+
+    private int addString(String str) {
+        // 检查是否已存在
+        for (int i = 0; i < this.stringTable.size(); i++) {
+            String entry = this.stringTable.get(i);
+            if (entry.equals(str)) {
+                // 计算偏移: 4 (size) + 之前所有字符串长度之和
+                int off = 4;
+                for (int j = 0; j < i; j++) {
+                    String prevEntry = this.stringTable.get(j);
+                    off = off + prevEntry.length() + 1;
+                }
+                return off;
+            }
+        }
+        int offset = this.stringTableSize;
+        this.stringTable.add(str);
+        this.stringTableSize = this.stringTableSize + str.length() + 1;
+        return offset;
+    }
+
+    // ---- 从 NativeModule 构建 COFF ----
+
+    public void buildFromNativeModule(NativeModule module) {
+        // 1. 创建 .text 段 (代码)
+        int textSecIdx = this.addSection(".text",
+            COFF64.SCN_CNT_CODE |
+            COFF64.SCN_MEM_EXEC |
+            COFF64.SCN_MEM_READ);
+        CoffSection textSec = this.getSection(textSecIdx);
+
+        // 2. 创建 .data 段 (已初始化数据)
+        int dataSecIdx = this.addSection(".data",
+            COFF64.SCN_CNT_IDATA |
+            COFF64.SCN_MEM_READ |
+            COFF64.SCN_MEM_WRITE);
+        CoffSection dataSec = this.getSection(dataSecIdx);
+
+        // 3. 添加文件符号 (第一个符号必须是文件符号)
+        this.addSymbol(".file", 0, COFF64.SYM_DEBUG,
+            COFF64.SYM_TYPE_NULL, COFF64.SYM_FILE, 0);
+
+        // 4. 添加段符号 (每个段需要一个静态符号)
+        int textSymIdx = this.addSymbol(".text", 0, textSecIdx,
+            COFF64.SYM_TYPE_NULL, COFF64.SYM_STATIC, 1);
+        // 辅助符号: 段长度信息 (18 字节全零)
+        this.addSymbol("", 0, textSecIdx,
+            COFF64.SYM_TYPE_NULL, COFF64.SYM_STATIC, 0);
+
+        int dataSymIdx = this.addSymbol(".data", 0, dataSecIdx,
+            COFF64.SYM_TYPE_NULL, COFF64.SYM_STATIC, 1);
+        this.addSymbol("", 0, dataSecIdx,
+            COFF64.SYM_TYPE_NULL, COFF64.SYM_STATIC, 0);
+
+        // 5. 编译函数到 .text 段
+        int textOffset = 0;
+        for (int fi = 0; fi < module.functions.size(); fi++) {
+            NativeFunction func = module.functions.get(fi);
+
+            // 添加函数符号
+            int funcSymIdx = this.addSymbol(func.name, textOffset, textSecIdx,
+                COFF64.SYM_TYPE_FUNC, COFF64.SYM_EXT, 0);
+
+            // 写入函数机器码到 .text 段
+            for (int bi = 0; bi < func.code.size(); bi++) {
+                textSec.data.add(func.code.get(bi));
+            }
+
+            // 为函数中的 CALL 指令添加重定位
+            // 扫描机器码中的 CALL 指令 (E8 xx xx xx xx)
+            this.scanCallRelocations(textSec, textOffset, func.code, funcSymIdx);
+
+            textOffset = textOffset + func.code.size();
+        }
+
+        // 6. 编译数据到 .data 段
+        int dataOffset = 0;
+        for (int di = 0; di < module.dataEntries.size(); di++) {
+            NativeData data = module.dataEntries.get(di);
+
+            // 添加数据符号
+            this.addSymbol(data.name, dataOffset, dataSecIdx,
+                COFF64.SYM_TYPE_NULL, COFF64.SYM_STATIC, 0);
+
+            // 写入数据字节
+            for (int bi = 0; bi < data.bytes.size(); bi++) {
+                dataSec.data.add(data.bytes.get(bi));
+            }
+
+            dataOffset = dataOffset + data.bytes.size();
+        }
+
+        // 7. 对齐 .data 段到 8 字节
+        while (dataSec.data.size() % 8 != 0) {
+            dataSec.data.add(0);
+        }
+
+        // 8. 添加外部函数符号
+        for (int ei = 0; ei < module.externNames.size(); ei++) {
+            String extName = module.externNames.get(ei);
+            this.addSymbol(extName, 0, COFF64.SYM_UNDEF,
+                COFF64.SYM_TYPE_NULL, COFF64.SYM_EXT, 0);
+        }
+
+        // 9. 更新段符号的辅助信息
+        // 辅助符号的 value 字段存储段大小
+        if (this.symbols.size() > 1) {
+            // textSec 辅助符号 (index textSymIdx + 1)
+            int textAuxIdx = textSymIdx + 1;
+            if (textAuxIdx < this.symbols.size()) {
+                CoffSymbol textAuxSym = this.symbols.get(textAuxIdx);
+                textAuxSym.value = textSec.data.size();
+            }
+            // dataSec 辅助符号 (index dataSymIdx + 1)
+            int dataAuxIdx = dataSymIdx + 1;
+            if (dataAuxIdx < this.symbols.size()) {
+                CoffSymbol dataAuxSym = this.symbols.get(dataAuxIdx);
+                dataAuxSym.value = dataSec.data.size();
+            }
+        }
+    }
+
+    // 扫描 CALL 指令并添加重定位
+    private void scanCallRelocations(CoffSection textSec, int funcOffset, NativeFunction func, int funcSymIdx) {
+        for (int ci = 0; ci < func.callOffsets.size(); ci++) {
+            int callOffset = func.callOffsets.get(ci);
+            String callName = func.callNames.get(ci);
+            // 查找或创建外部符号
+            int extSymIdx = this.findOrCreateExternalSymbol(callName);
+            // CALL 指令是 E8 + 4字节位移，重定位字段在 callOffset+1
+            // emitCall(-4) 已在位移字段写入 -4 addend
+            int relocOffset = funcOffset + callOffset + 1;
+            textSec.addReloc(relocOffset, extSymIdx, COFF64.REL_REL32);
+        }
+    }
+
+    // 查找或创建外部符号索引
+    private int findOrCreateExternalSymbol(String name) {
+        for (int si = 0; si < this.symbols.size(); si++) {
+            CoffSymbol sym = this.symbols.get(si);
+            String symName = sym.name;
+            if (symName.equals(name) && sym.sectionNumber == COFF64.SYM_UNDEF) {
+                return si;
+            }
+        }
+        return this.addSymbol(name, 0, COFF64.SYM_UNDEF,
+            COFF64.SYM_TYPE_NULL, COFF64.SYM_EXT, 0);
+    }
+
+    // ---- 序列化为字节数组 ----
+
+    public Array<int> serialize() {
+        Array<int> output = new Array<int>();
+
+        int numSections = this.sections.size();
+        int numSymbols = this.symbols.size();
+
+        // ---- COFF 文件头 (20 字节) ----
+        this.writeWord(output, COFF64.MACH_AMD64);   // Machine
+        this.writeWord(output, numSections);              // NumberOfSections
+        this.writeDWord(output, 0);                       // TimeDateStamp
+        this.writeDWord(output, 0);                       // PointerToSymbolTable (稍后填充)
+        this.writeDWord(output, numSymbols);              // NumberOfSymbols
+        this.writeWord(output, 0);                        // SizeOfOptionalHeader
+        this.writeWord(output, 0);                        // Characteristics
+
+        // ---- 段表 (每段 40 字节) ----
+        // 先计算各段数据的偏移
+        int sectionTableEnd = 20 + numSections * 40;
+        int currentDataOffset = sectionTableEnd;
+
+        Array<int> dataOffsets = new Array<int>();
+        Array<int> relocOffsets = new Array<int>();
+        for (int si = 0; si < numSections; si++) {
+            CoffSection sec = this.sections.get(si);
+            dataOffsets.add(currentDataOffset);
+            currentDataOffset = currentDataOffset + sec.data.size();
+            // 对齐到 4 字节
+            while (currentDataOffset % 4 != 0) currentDataOffset = currentDataOffset + 1;
+        }
+
+        // 重定位表偏移
+        for (int si = 0; si < numSections; si++) {
+            CoffSection sec = this.sections.get(si);
+            relocOffsets.add(currentDataOffset);
+            currentDataOffset = currentDataOffset + sec.relocations.size() * 10;
+        }
+
+        int symbolTableOffset = currentDataOffset;
+
+        // 回填符号表偏移
+        int headerPos = 8; // PointerToSymbolTable 在文件头偏移 8
+        output.clear(); // 重新开始
+
+        // ---- COFF 文件头 ----
+        this.writeWord(output, COFF64.MACH_AMD64);
+        this.writeWord(output, numSections);
+        this.writeDWord(output, 0);                       // TimeDateStamp
+        this.writeDWord(output, symbolTableOffset);       // PointerToSymbolTable
+        this.writeDWord(output, numSymbols);
+        this.writeWord(output, 0);                        // SizeOfOptionalHeader
+        this.writeWord(output, 0);                        // Characteristics
+
+        // ---- 段表 ----
+        for (int si = 0; si < numSections; si++) {
+            CoffSection sec = this.sections.get(si);
+            // Name (8 字节, 空补齐)
+            this.writeName(output, sec.name, 8);
+            // VirtualSize
+            this.writeDWord(output, sec.data.size());
+            // VirtualAddress
+            this.writeDWord(output, 0);
+            // SizeOfRawData
+            this.writeDWord(output, sec.data.size());
+            // PointerToRawData
+            this.writeDWord(output, dataOffsets.get(si));
+            // PointerToRelocations
+            if (sec.relocations.size() > 0) {
+                this.writeDWord(output, relocOffsets.get(si));
+            } else {
+                this.writeDWord(output, 0);
+            }
+            // PointerToLinenumbers
+            this.writeDWord(output, 0);
+            // NumberOfRelocations
+            this.writeWord(output, sec.relocations.size());
+            // NumberOfLinenumbers
+            this.writeWord(output, 0);
+            // Characteristics
+            this.writeDWord(output, sec.characteristics);
+        }
+
+        // ---- 段数据 ----
+        for (int si = 0; si < numSections; si++) {
+            CoffSection sec = this.sections.get(si);
+            for (int bi = 0; bi < sec.data.size(); bi++) {
+                int byteVal = sec.data.get(bi);
+                output.add(byteVal & 255);
+            }
+            // 对齐到 4 字节
+            while (output.size() % 4 != 0) {
+                output.add(0);
+            }
+        }
+
+        // ---- 重定位表 ----
+        for (int si = 0; si < numSections; si++) {
+            CoffSection sec = this.sections.get(si);
+            for (int ri = 0; ri < sec.relocations.size(); ri++) {
+                CoffReloc reloc = sec.relocations.get(ri);
+                this.writeDWord(output, reloc.virtualAddress);
+                this.writeDWord(output, reloc.symbolIndex);
+                this.writeWord(output, reloc.type);
+            }
+        }
+
+        // ---- 符号表 ----
+        for (int si = 0; si < this.symbols.size(); si++) {
+            CoffSymbol sym = this.symbols.get(si);
+            this.writeSymbolEntry(output, sym);
+        }
+
+        // ---- 字符串表 ----
+        this.writeDWord(output, this.stringTableSize);
+        for (int si = 0; si < this.stringTable.size(); si++) {
+            String str = this.stringTable.get(si);
+            for (int ci = 0; ci < str.length(); ci++) {
+                output.add((int)str.charAt(ci));
+            }
+            output.add(0); // null terminator
+        }
+
+        return output;
+    }
+
+    // ---- 辅助写入方法 ----
+
+    private void writeByte(Array<int> out, int b) {
+        out.add(b & 255);
+    }
+
+    private void writeWord(Array<int> out, int w) {
+        out.add(w & 255);
+        out.add((w >> 8) & 255);
+    }
+
+    private void writeDWord(Array<int> out, int d) {
+        out.add(d & 255);
+        out.add((d >> 8) & 255);
+        out.add((d >> 16) & 255);
+        out.add((d >> 24) & 255);
+    }
+
+    private void writeName(Array<int> out, String name, int maxLen) {
+        if (name.length() > maxLen) {
+            // 长名称使用字符串表
+            int strOff = this.addString(name);
+            out.add(47); // '/'
+            // 写入偏移的 ASCII 数字
+            String offStr = String.intToString(strOff);
+            for (int i = 0; i < offStr.length() && i < maxLen - 1; i++) {
+                out.add((int)offStr.charAt(i));
+            }
+            // 补齐
+            for (int i = offStr.length() + 1; i < maxLen; i++) {
+                out.add(0);
+            }
+        } else {
+            for (int i = 0; i < name.length(); i++) {
+                out.add((int)name.charAt(i));
+            }
+            for (int i = name.length(); i < maxLen; i++) {
+                out.add(0);
+            }
+        }
+    }
+
+    private void writeSymbolEntry(Array<int> out, CoffSymbol sym) {
+        // 符号名称 (8 字节)
+        String symName = sym.name;
+        if (symName.length() > 8) {
+            // 长名称: 前 4 字节为 0, 后 4 字节为字符串表偏移
+            this.writeDWord(out, 0);
+            int strOff = this.addString(symName);
+            this.writeDWord(out, strOff);
+        } else {
+            for (int i = 0; i < symName.length(); i++) {
+                out.add((int)symName.charAt(i));
+            }
+            for (int i = symName.length(); i < 8; i++) {
+                out.add(0);
+            }
+        }
+        // Value
+        this.writeDWord(out, sym.value);
+        // SectionNumber (signed 16-bit)
+        this.writeWord(out, sym.sectionNumber & 65535);
+        // Type
+        this.writeWord(out, sym.type);
+        // StorageClass
+        this.writeByte(out, sym.storageClass);
+        // NumberOfAuxSymbols
+        this.writeByte(out, sym.numAux);
+    }
+
+    // ---- 转储为可读文本 ----
+
+    public String dump() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("; COFF64 Object File\n");
+        sb.append("; Machine: AMD64\n\n");
+
+        sb.append("[Sections]\n");
+        for (int i = 0; i < this.sections.size(); i++) {
+            CoffSection sec = this.sections.get(i);
+            sb.append("  " + (i + 1) + ": " + sec.name + " size=" + sec.data.size() + " relocs=" + sec.relocations.size() + "\n");
+        }
+        sb.append("\n");
+
+        sb.append("[Symbols]\n");
+        for (int i = 0; i < this.symbols.size(); i++) {
+            CoffSymbol sym = this.symbols.get(i);
+            String secStr = "";
+            if (sym.sectionNumber == 0) secStr = "UNDEF";
+            else if (sym.sectionNumber == -1) secStr = "ABS";
+            else if (sym.sectionNumber == -2) secStr = "DEBUG";
+            else secStr = String.intToString(sym.sectionNumber);
+
+            String clsStr = "";
+            if (sym.storageClass == 2) clsStr = "EXT";
+            else if (sym.storageClass == 3) clsStr = "STAT";
+            else if (sym.storageClass == 6) clsStr = "FUNC";
+            else if (sym.storageClass == 103) clsStr = "FILE";
+            else if (sym.storageClass == 104) clsStr = "SEC";
+            else clsStr = String.intToString(sym.storageClass);
+
+            sb.append("  " + i + ": " + sym.name + " val=" + sym.value + " sec=" + secStr + " cls=" + clsStr + "\n");
+        }
+        sb.append("\n");
+
+        sb.append("[String Table] size=" + this.stringTableSize + "\n");
+        for (int i = 0; i < this.stringTable.size(); i++) {
+            sb.append("  " + this.stringTable.get(i) + "\n");
+        }
+
+        return sb.toString();
+    }
+}

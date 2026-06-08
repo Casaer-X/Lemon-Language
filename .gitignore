@@ -1,11 +1,11 @@
-# No source code in this repository - it's an umbrella/landing page repo
-# Only documentation and meta files are tracked
+# Language Lemon - Self-hosting compiler source
+# https://github.com/Casaer-X/Language-Lemon
 
-# Ignore all source directories
+# External sub-repos (not tracked here)
 lemonc/
 vscode-lemon/
 
-# Ignore build artifacts
+# Build artifacts
 *.exe
 *.o
 *.obj
@@ -16,17 +16,17 @@ vscode-lemon/
 *.out
 *.log
 
-# Ignore debug/temp files
+# Debug/temp files
 debug.gdb
 *_err.txt
 *_out.txt
 
-# Ignore IDE files
+# IDE files
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Ignore OS files
+# OS files
 .DS_Store
 Thumbs.db

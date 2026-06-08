@@ -1,0 +1,97 @@
+// @compile target=library
+// Lemon Standard Library - I/O Module
+
+package io;
+
+public class Console {
+    public static void print(String value) {
+        System.printf("%s", value);
+    }
+
+    public static void println(String value) {
+        System.printf("%s\n", value);
+    }
+
+    public static void printInt(int value) {
+        System.printf("%d", value);
+    }
+
+    public static void printlnInt(int value) {
+        System.printf("%d\n", value);
+    }
+
+    public static void printLong(long value) {
+        System.printf("%ld", value);
+    }
+
+    public static void printlnLong(long value) {
+        System.printf("%ld\n", value);
+    }
+
+    public static void printDouble(double value) {
+        System.printf("%f", value);
+    }
+
+    public static void printlnDouble(double value) {
+        System.printf("%f\n", value);
+    }
+
+    public static void printBool(bool value) {
+        if (value) {
+            System.printf("true");
+        } else {
+            System.printf("false");
+        }
+    }
+
+    public static void printlnBool(bool value) {
+        Console.printBool(value);
+        Console.newLine();
+    }
+
+    public static void printChar(char value) {
+        System.printf("%c", value);
+    }
+
+    public static void printlnChar(char value) {
+        System.printf("%c\n", value);
+    }
+
+    public static void newLine() {
+        System.printf("\n");
+    }
+
+    public static void space() {
+        System.printf(" ");
+    }
+
+    public static int readInt() {
+        int value = 0;
+        scanf("%d", &value);
+        return value;
+    }
+
+    public static double readDouble() {
+        double value = 0.0;
+        scanf("%lf", &value);
+        return value;
+    }
+
+    public static char readChar() {
+        return System.getchar();
+    }
+}
+
+public class Format {
+    public static void printLabelInt(String label, int value) {
+        System.printf("%s%d\n", label, value);
+    }
+
+    public static void printLabelDouble(String label, double value) {
+        System.printf("%s%f\n", label, value);
+    }
+
+    public static void printLabelString(String label, String value) {
+        System.printf("%s%s\n", label, value);
+    }
+}

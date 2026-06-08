@@ -4,6 +4,47 @@ All notable changes to the Language Lemon project will be documented in this fil
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [4.1.0] - 2026-05-25
+
+### Added — IR 中间表示
+- IRType.lm: IR 类型系统（12 种类型，工厂方法，类型查询）
+- IR.lm: SSA IR 指令定义（40+ 操作码，基本块，值引用，Phi 节点）
+- IRFunction.lm: IR 函数/模块/结构体定义，30+ 便捷指令构建方法
+- IRGen.lm: AST → SSA IR 生成器（函数/语句/表达式/控制流）
+- LemonCompiler 新增 `--target ir` 选项
+
+## [4.0.0] - 2026-05-25
+
+### Added — 运行时库与混合执行
+- Runtime.lm: 40+ 运行时函数注册，C 头文件/实现生成
+- ExecutionStrategy.lm: AOT/JIT/INTERPRET/HYBRID 策略分析器
+- LemonCompiler `--target hybrid` 混合执行集成
+- 所有长期计划 Phase 3-5 任务完成
+
+## [3.7.0] - 2026-05-25
+
+### Added — JIT 编译器
+- JitCompiler.lm: 基于栈的 JIT 编译器，将字节码热点函数编译为 x86-64 机器码
+- JitState 热点检测、PendingJump 跳转补丁、完整指令集编译
+- LemonCompiler `--target bytecode` 集成 JIT 编译输出
+
+## [3.6.0] - 2026-05-25
+
+### Added — 原生代码生成器 (NativeCodeGen)
+- NativeCodeGen.lm: AST → x86-64 机器码生成器，使用 X8664 指令编码器
+- Windows x64 调用约定支持（RCX/RDX/R8/R9 传参，shadow space）
+- 支持函数/方法/构造函数编译、二元/一元运算、条件跳转、循环、字段访问
+- LemonCompiler 集成 `--target native` 输出可读机器码转储
+
+### Fixed
+- lemonvm.rs 中 `jit_compiler` 缺少 `mut` 声明
+
+## [2.3.0] - 2026-05-23
+
+### Known Issues Fix — VM Hardcoded Fixes + CCodeGen Unification + LemonMap Iterative Rehash
+
+Fixed VM Cast/InstanceOf/TypeId/Lt-Float hardcodes, unified CCodeGen exprIsStringType string-returning name lists, converted LemonMap rehash from recursive to iterative, cleaned up 17 root .c files. See [v2.3.0 changelog](changelogs/v2.3.0.md) for details.
+
 ## [2.2.0] - 2026-05-23
 
 ### Hybrid AOT+JIT Compilation + Runtime Library

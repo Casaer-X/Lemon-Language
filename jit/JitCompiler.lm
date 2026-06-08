@@ -1,0 +1,715 @@
+package lemon.jit;
+
+import lemon.codegen.X8664;
+import lemon.codegen.Reg;
+
+// ============================================================
+// JIT 编译器 (Lemon 版)
+// 将 BytecodeModule 中的热点函数编译为 x86-64 机器码
+//
+// 策略: 基于栈的 JIT，使用 x86 栈作为值栈
+// 局部变量存储在 [rbp - (idx+1)*8]
+// Windows x64 调用约定: rcx, rdx, r8, r9 传参
+// ============================================================
+
+// JIT 编译后的函数
+class JitCompiledFunction {
+    public int funcIndex;
+    public String name;
+    public Array<int> code;
+    public int codeSize;
+    public int frameSize;
+    public int paramCount;
+
+    public JitCompiledFunction(int funcIndex, String name, int frameSize, int paramCount) {
+        this.funcIndex = funcIndex;
+        this.name = name;
+        this.code = new Array<int>();
+        this.codeSize = 0;
+        this.frameSize = frameSize;
+        this.paramCount = paramCount;
+    }
+}
+
+// 待修复跳转
+class PendingJump {
+    public int patchOffset;
+    public int targetLabel;
+
+    public PendingJump(int patchOffset, int targetLabel) {
+        this.patchOffset = patchOffset;
+        this.targetLabel = targetLabel;
+    }
+}
+
+// JIT 状态
+class JitState {
+    public Array<int> compiledIndices;
+    public Array<JitCompiledFunction> compiledFunctions;
+    public Array<int> executionCounts;
+    public int hotThreshold;
+    public bool enabled;
+
+    public JitState() {
+        this.compiledIndices = new Array<int>();
+        this.compiledFunctions = new Array<JitCompiledFunction>();
+        this.executionCounts = new Array<int>();
+        this.hotThreshold = 100;
+        this.enabled = true;
+    }
+
+    public bool recordExecution(int funcIdx) {
+        if (!this.enabled) return false;
+        while (this.executionCounts.size() <= funcIdx) {
+            this.executionCounts.add(0);
+        }
+        int prevCount = this.executionCounts.get(funcIdx);
+        int count = prevCount + 1;
+        this.executionCounts.set(funcIdx, count);
+        return count >= this.hotThreshold && !this.isCompiled(funcIdx);
+    }
+
+    public bool isCompiled(int funcIdx) {
+        for (int i = 0; i < this.compiledIndices.size(); i++) {
+            if (this.compiledIndices.get(i) == funcIdx) return true;
+        }
+        return false;
+    }
+
+    public void registerCompiled(int funcIdx, JitCompiledFunction func) {
+        this.compiledIndices.add(funcIdx);
+        this.compiledFunctions.add(func);
+    }
+
+    public int getExecutionCount(int funcIdx) {
+        if (funcIdx < this.executionCounts.size()) {
+            return this.executionCounts.get(funcIdx);
+        }
+        return 0;
+    }
+
+    public void resetCounts() {
+        this.executionCounts.clear();
+    }
+}
+
+// JIT 编译器
+class JitCompiler {
+    private Array<int> labelPositions;
+    private Array<PendingJump> pendingJumps;
+    private int nextLabel;
+
+    public JitCompiler() {
+        this.labelPositions = new Array<int>();
+        this.pendingJumps = new Array<PendingJump>();
+        this.nextLabel = 0;
+    }
+
+    private int newLabel() {
+        int label = this.nextLabel;
+        this.nextLabel = this.nextLabel + 1;
+        return label;
+    }
+
+    private void emitLabel(Array<int> code, int label) {
+        while (this.labelPositions.size() <= label) {
+            this.labelPositions.add(-1);
+        }
+        this.labelPositions.set(label, code.size());
+    }
+
+    private void patchJumps(Array<int> code) {
+        for (int i = 0; i < this.pendingJumps.size(); i++) {
+            PendingJump jump = this.pendingJumps.get(i);
+            if (jump.targetLabel < this.labelPositions.size()) {
+                int target = this.labelPositions.get(jump.targetLabel);
+                if (target >= 0 && jump.patchOffset + 3 < code.size()) {
+                    int offset = target - jump.patchOffset - 4;
+                    code.set(jump.patchOffset, offset & 255);
+                    code.set(jump.patchOffset + 1, (offset >> 8) & 255);
+                    code.set(jump.patchOffset + 2, (offset >> 16) & 255);
+                    code.set(jump.patchOffset + 3, (offset >> 24) & 255);
+                }
+            }
+        }
+    }
+
+    // ---- 编译单个函数 ----
+
+    public JitCompiledFunction compileFunction(BytecodeFunction func, BytecodeModule module) {
+        Array<int> code = new Array<int>();
+
+        this.labelPositions.clear();
+        this.pendingJumps.clear();
+        this.nextLabel = 0;
+
+        // 为每条字节码指令预分配标签
+        int numInstructions = func.instructions.size();
+        for (int i = 0; i < numInstructions; i++) {
+            this.emitLabel(code, i);
+        }
+
+        // === 函数序言 ===
+        // push rbp
+        this.emitPushReg(code, Reg.RBP);
+        // mov rbp, rsp
+        this.emitMovRegReg(code, Reg.RBP, Reg.RSP);
+        // push rbx (callee-saved)
+        this.emitPushReg(code, Reg.RBX);
+        // push rsi
+        this.emitPushReg(code, Reg.RSI);
+        // push rdi
+        this.emitPushReg(code, Reg.RDI);
+
+        // 为局部变量分配栈空间 (16 字节对齐)
+        int localsSize = ((func.localCount * 8) + 15) / 16 * 16;
+        if (localsSize > 0) {
+            // sub rsp, localsSize
+            this.emitSubRspImm(code, localsSize);
+        }
+
+        // 复制寄存器参数到局部变量槽
+        // Windows x64: rcx=local0, rdx=local1, r8=local2, r9=local3
+        Array<int> argRegs = new Array<int>();
+        argRegs.add(Reg.RCX);
+        argRegs.add(Reg.RDX);
+        argRegs.add(Reg.R8);
+        argRegs.add(Reg.R9);
+        for (int i = 0; i < 4; i++) {
+            if (i < func.paramCount) {
+                int offset = -((i + 1) * 8);
+                this.emitMovMemRbpReg(code, offset, argRegs.get(i));
+            }
+        }
+
+        // === 编译字节码指令 ===
+        for (int ii = 0; ii < func.instructions.size(); ii++) {
+            BytecodeInstruction inst = func.instructions.get(ii);
+            this.compileInstruction(inst, code, func, module);
+        }
+
+        // === 函数尾声 (默认返回) ===
+        // xor rax, rax
+        this.emitXorRegReg(code, Reg.RAX, Reg.RAX);
+
+        // 恢复栈和被调用者保存寄存器
+        if (localsSize > 0) {
+            this.emitAddRspImm(code, localsSize);
+        }
+        this.emitPopReg(code, Reg.RDI);
+        this.emitPopReg(code, Reg.RSI);
+        this.emitPopReg(code, Reg.RBX);
+        this.emitPopReg(code, Reg.RBP);
+        // ret
+        code.add(195);
+
+        // 修复所有跳转目标
+        this.patchJumps(code);
+
+        JitCompiledFunction result = new JitCompiledFunction(0, func.name, localsSize, func.paramCount);
+        result.code = code;
+        result.codeSize = code.size();
+        return result;
+    }
+
+    // ---- 编译单条字节码指令 ----
+
+    private void compileInstruction(BytecodeInstruction inst, Array<int> code, BytecodeFunction func, BytecodeModule module) {
+        int op = inst.opcode;
+        int operand = inst.operand;
+
+        // ---- 栈操作 ----
+        if (op == OpCode.NOP) {
+            code.add(144); // NOP
+        } else if (op == OpCode.PUSH_NULL) {
+            // push 0
+            code.add(106);
+            code.add(0);
+        } else if (op == OpCode.PUSH_TRUE) {
+            // mov rax, 1; push rax
+            this.emitMovRegImm32(code, Reg.RAX, 1);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.PUSH_FALSE) {
+            // xor rax, rax; push rax
+            this.emitXorRegReg(code, Reg.RAX, Reg.RAX);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.PUSH_I8 || op == OpCode.PUSH_I16 || op == OpCode.PUSH_I32) {
+            this.emitMovRegImm32(code, Reg.RAX, operand);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.PUSH_I64) {
+            this.emitMovRegImm64(code, Reg.RAX, inst.longOperand);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.PUSH_F32 || op == OpCode.PUSH_F64) {
+            // 将 float 值的位模式作为 imm64 推入栈
+            // 简化: 直接推入 0 作为占位符
+            this.emitMovRegImm32(code, Reg.RAX, 0);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.PUSH_STR) {
+            // 推入字符串索引 (高位设置标记位)
+            long tagged = ((long)operand) | ((long)1 << 48);
+            this.emitMovRegImm64(code, Reg.RAX, tagged);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.POP) {
+            // add rsp, 8
+            code.add(72); code.add(131); code.add(196); code.add(8);
+        } else if (op == OpCode.DUP) {
+            // mov rax, [rsp]; push rax
+            this.emitMovRegStackTop(code, Reg.RAX);
+            this.emitPushReg(code, Reg.RAX);
+
+        // ---- 局部变量 ----
+        } else if (op == OpCode.LOAD_LOCAL) {
+            int offset = -((operand + 1) * 8);
+            this.emitMovRegMemRbp(code, Reg.RAX, offset);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.STORE_LOCAL) {
+            this.emitPopReg(code, Reg.RAX);
+            int offset = -((operand + 1) * 8);
+            this.emitMovMemRbpReg(code, offset, Reg.RAX);
+        } else if (op == OpCode.LOAD_THIS) {
+            int offset = -(1 * 8);
+            this.emitMovRegMemRbp(code, Reg.RAX, offset);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.LOAD_FIELD) {
+            this.emitPopReg(code, Reg.RAX);
+            int fieldOffset = operand * 8;
+            this.emitMovRegMemRax(code, Reg.RAX, fieldOffset);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.STORE_FIELD) {
+            this.emitPopReg(code, Reg.RAX); // value
+            this.emitPopReg(code, Reg.RCX); // obj
+            int fieldOffset = operand * 8;
+            this.emitMovMemRaxReg(code, fieldOffset, Reg.RAX);
+
+        // ---- 算术运算 ----
+        } else if (op == OpCode.IADD) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            this.emitAddRegReg(code, Reg.RAX, Reg.RBX);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.ISUB) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            this.emitSubRegReg(code, Reg.RAX, Reg.RBX);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.IMUL) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            this.emitImulRegReg(code, Reg.RAX, Reg.RBX);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.IDIV) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            this.emitIdivReg(code, Reg.RBX);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.IMOD) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            this.emitIdivReg(code, Reg.RBX);
+            // rdx = 余数
+            this.emitMovRegReg(code, Reg.RAX, Reg.RDX);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.INEG) {
+            this.emitPopReg(code, Reg.RAX);
+            // neg rax
+            code.add(72); code.add(247); code.add(216);
+            this.emitPushReg(code, Reg.RAX);
+
+        // ---- 位运算 ----
+        } else if (op == OpCode.IAND) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            // and rax, rbx
+            code.add(72); code.add(33); code.add(216);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.IOR) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            // or rax, rbx
+            code.add(72); code.add(9); code.add(216);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.IXOR) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            // xor rax, rbx
+            code.add(72); code.add(49); code.add(216);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.ISHL) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            // mov cl, bl; shl rax, cl
+            code.add(136); code.add(217);
+            code.add(72); code.add(211); code.add(224);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.ISHR) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            code.add(136); code.add(217);
+            code.add(72); code.add(211); code.add(232);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.INOT) {
+            this.emitPopReg(code, Reg.RAX);
+            // not rax
+            code.add(72); code.add(247); code.add(208);
+            this.emitPushReg(code, Reg.RAX);
+
+        // ---- 比较运算 ----
+        } else if (op == OpCode.ICMP_EQ) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            this.emitCmpRegReg(code, Reg.RAX, Reg.RBX);
+            this.emitSetCC(code, 148); // sete
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.ICMP_NE) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            this.emitCmpRegReg(code, Reg.RAX, Reg.RBX);
+            this.emitSetCC(code, 149); // setne
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.ICMP_LT) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            this.emitCmpRegReg(code, Reg.RAX, Reg.RBX);
+            this.emitSetCC(code, 156); // setl
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.ICMP_GT) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            this.emitCmpRegReg(code, Reg.RAX, Reg.RBX);
+            this.emitSetCC(code, 159); // setg
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.ICMP_LE) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            this.emitCmpRegReg(code, Reg.RAX, Reg.RBX);
+            this.emitSetCC(code, 158); // setle
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.ICMP_GE) {
+            this.emitPopReg(code, Reg.RBX);
+            this.emitPopReg(code, Reg.RAX);
+            this.emitCmpRegReg(code, Reg.RAX, Reg.RBX);
+            this.emitSetCC(code, 157); // setge
+            this.emitPushReg(code, Reg.RAX);
+
+        // ---- 控制流 ----
+        } else if (op == OpCode.JMP) {
+            this.emitJmp(code, operand);
+        } else if (op == OpCode.JMP_TRUE) {
+            this.emitPopReg(code, Reg.RAX);
+            // test rax, rax
+            code.add(72); code.add(133); code.add(192);
+            this.emitJcc(code, 5, operand); // JNZ
+        } else if (op == OpCode.JMP_FALSE) {
+            this.emitPopReg(code, Reg.RAX);
+            code.add(72); code.add(133); code.add(192);
+            this.emitJcc(code, 4, operand); // JZ
+        } else if (op == OpCode.RET) {
+            this.emitPopReg(code, Reg.RAX);
+            // 恢复栈帧
+            // mov rsp, rbp
+            code.add(72); code.add(137); code.add(229);
+            this.emitPopReg(code, Reg.RBP);
+            code.add(195); // ret
+        } else if (op == OpCode.RET_VOID) {
+            code.add(72); code.add(137); code.add(229);
+            this.emitPopReg(code, Reg.RBP);
+            code.add(195);
+
+        // ---- 调用 ----
+        } else if (op == OpCode.CALL) {
+            // 简化: 生成 call 占位符
+            // mov rax, 0; call rax
+            this.emitMovRegImm32(code, Reg.RAX, 0);
+            code.add(255); code.add(208); // call rax
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.CALL_VIRT) {
+            this.emitMovRegImm32(code, Reg.RAX, 0);
+            code.add(255); code.add(208);
+            this.emitPushReg(code, Reg.RAX);
+
+        // ---- 对象操作 ----
+        } else if (op == OpCode.NEW_OBJ) {
+            this.emitMovRegImm32(code, Reg.RAX, 0);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.NEW_ARR) {
+            this.emitPopReg(code, Reg.RAX);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.ARR_GET) {
+            this.emitPopReg(code, Reg.RBX); // idx
+            this.emitPopReg(code, Reg.RAX); // arr
+            // mov rax, [rax + rbx*8 + 16]
+            code.add(72); code.add(139); code.add(68); code.add(216); code.add(16);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.ARR_SET) {
+            this.emitPopReg(code, Reg.RDX); // value
+            this.emitPopReg(code, Reg.RBX); // idx
+            this.emitPopReg(code, Reg.RAX); // arr
+            // mov [rax + rbx*8 + 16], rdx
+            code.add(72); code.add(137); code.add(84); code.add(216); code.add(16);
+        } else if (op == OpCode.ARR_LEN) {
+            this.emitPopReg(code, Reg.RAX);
+            // mov rax, [rax]
+            code.add(72); code.add(139); code.add(0);
+            this.emitPushReg(code, Reg.RAX);
+
+        // ---- 类型操作 ----
+        } else if (op == OpCode.INSTANCEOF) {
+            this.emitPopReg(code, Reg.RAX);
+            this.emitMovRegImm32(code, Reg.RAX, 1);
+            this.emitPushReg(code, Reg.RAX);
+        } else if (op == OpCode.CHECKCAST) {
+            // 类型检查: 直接通过
+        }
+
+        // ---- 调试信息 ----
+        else if (op == OpCode.LINE_NUM || op == OpCode.FILE_MARK) {
+            // 忽略
+        }
+    }
+
+    // ---- 编译整个模块 ----
+
+    public void compileModule(BytecodeModule module, JitState state) {
+        for (int i = 0; i < module.functions.size(); i++) {
+            if (state.recordExecution(i)) {
+                BytecodeFunction func = module.functions.get(i);
+                JitCompiledFunction jitFunc = this.compileFunction(func, module);
+                state.registerCompiled(i, jitFunc);
+            }
+        }
+    }
+
+    // ---- x86-64 指令编码辅助 ----
+
+    private void emitPushReg(Array<int> code, int reg) {
+        if (reg < 8) {
+            code.add(80 + reg);
+        } else {
+            code.add(65); // REX.B
+            code.add(80 + (reg - 8));
+        }
+    }
+
+    private void emitPopReg(Array<int> code, int reg) {
+        if (reg < 8) {
+            code.add(88 + reg);
+        } else {
+            code.add(65);
+            code.add(88 + (reg - 8));
+        }
+    }
+
+    private void emitMovRegImm32(Array<int> code, int reg, int imm) {
+        if (reg < 8) {
+            code.add(72); // REX.W
+            code.add(199); // mov r/m64, imm32
+            code.add(192 + (reg & 7)); // ModR/M
+        } else {
+            code.add(73); // REX.W + REX.B
+            code.add(199);
+            code.add(192 + (reg & 7));
+        }
+        this.writeDWord(code, imm);
+    }
+
+    private void emitMovRegImm64(Array<int> code, int reg, long imm) {
+        if (reg < 8) {
+            code.add(72); // REX.W
+            code.add(184 + reg); // mov r64, imm64
+        } else {
+            code.add(73); // REX.W + REX.B
+            code.add(184 + (reg - 8));
+        }
+        this.writeQWord(code, imm);
+    }
+
+    private void emitMovRegReg(Array<int> code, int dst, int src) {
+        int rex = 72;
+        if (dst >= 8) rex = rex + 4;
+        if (src >= 8) rex = rex + 1;
+        code.add(rex);
+        code.add(137); // mov r/m64, r64
+        int modrm = 192 + ((src & 7) << 3) + (dst & 7);
+        code.add(modrm);
+    }
+
+    private void emitAddRegReg(Array<int> code, int dst, int src) {
+        int rex = 72;
+        if (dst >= 8) rex = rex + 4;
+        if (src >= 8) rex = rex + 1;
+        code.add(rex);
+        code.add(1); // add r/m64, r64
+        int modrm = 192 + ((src & 7) << 3) + (dst & 7);
+        code.add(modrm);
+    }
+
+    private void emitSubRegReg(Array<int> code, int dst, int src) {
+        int rex = 72;
+        if (dst >= 8) rex = rex + 4;
+        if (src >= 8) rex = rex + 1;
+        code.add(rex);
+        code.add(41); // sub r/m64, r64
+        int modrm = 192 + ((src & 7) << 3) + (dst & 7);
+        code.add(modrm);
+    }
+
+    private void emitImulRegReg(Array<int> code, int dst, int src) {
+        int rex = 72;
+        if (dst >= 8) rex = rex + 4;
+        if (src >= 8) rex = rex + 1;
+        code.add(rex);
+        code.add(15); code.add(175); // imul r64, r/m64
+        int modrm = 192 + ((dst & 7) << 3) + (src & 7);
+        code.add(modrm);
+    }
+
+    private void emitIdivReg(Array<int> code, int src) {
+        // cqo (sign-extend rax into rdx:rax)
+        code.add(72); code.add(153);
+        // idiv r64
+        int rex = 72;
+        if (src >= 8) rex = rex + 1;
+        code.add(rex);
+        code.add(247);
+        int modrm = 248 + (src & 7); // /7
+        code.add(modrm);
+    }
+
+    private void emitCmpRegReg(Array<int> code, int a, int b) {
+        int rex = 72;
+        if (a >= 8) rex = rex + 4;
+        if (b >= 8) rex = rex + 1;
+        code.add(rex);
+        code.add(57); // cmp r/m64, r64
+        int modrm = 192 + ((b & 7) << 3) + (a & 7);
+        code.add(modrm);
+    }
+
+    private void emitXorRegReg(Array<int> code, int dst, int src) {
+        int rex = 72;
+        if (dst >= 8) rex = rex + 4;
+        if (src >= 8) rex = rex + 1;
+        code.add(rex);
+        code.add(49); // xor r/m64, r64
+        int modrm = 192 + ((src & 7) << 3) + (dst & 7);
+        code.add(modrm);
+    }
+
+    private void emitSetCC(Array<int> code, int cc) {
+        // setcc al; movzx rax, al
+        code.add(15); code.add(cc); code.add(192); // setcc al
+        code.add(72); code.add(15); code.add(182); code.add(192); // movzx rax, al
+    }
+
+    private void emitJmp(Array<int> code, int label) {
+        code.add(233); // jmp rel32
+        int patchOffset = code.size();
+        this.writeDWord(code, 0); // placeholder
+        this.pendingJumps.add(new PendingJump(patchOffset, label));
+    }
+
+    private void emitJcc(Array<int> code, int cc, int label) {
+        code.add(15); code.add(128 + cc); // jcc rel32
+        int patchOffset = code.size();
+        this.writeDWord(code, 0);
+        this.pendingJumps.add(new PendingJump(patchOffset, label));
+    }
+
+    private void emitMovRegStackTop(Array<int> code, int reg) {
+        // mov rax, [rsp]
+        code.add(72); code.add(139); code.add(4 + ((reg & 7) << 3)); code.add(36);
+    }
+
+    private void emitMovRegMemRbp(Array<int> code, int reg, int offset) {
+        code.add(72); code.add(139);
+        if (offset >= -128 && offset <= 127) {
+            code.add(69 + ((reg & 7) << 3));
+            code.add(offset & 255);
+        } else {
+            code.add(133 + ((reg & 7) << 3));
+            this.writeDWord(code, offset);
+        }
+    }
+
+    private void emitMovMemRbpReg(Array<int> code, int offset, int reg) {
+        code.add(72); code.add(137);
+        if (offset >= -128 && offset <= 127) {
+            code.add(69 + ((reg & 7) << 3));
+            code.add(offset & 255);
+        } else {
+            code.add(133 + ((reg & 7) << 3));
+            this.writeDWord(code, offset);
+        }
+    }
+
+    private void emitMovRegMemRax(Array<int> code, int reg, int offset) {
+        code.add(72); code.add(139);
+        if (offset >= -128 && offset <= 127) {
+            code.add(64 + ((reg & 7) << 3));
+            code.add(offset & 255);
+        } else {
+            code.add(128 + ((reg & 7) << 3));
+            this.writeDWord(code, offset);
+        }
+    }
+
+    private void emitMovMemRaxReg(Array<int> code, int offset, int reg) {
+        code.add(72); code.add(137);
+        if (offset >= -128 && offset <= 127) {
+            code.add(64 + ((reg & 7) << 3));
+            code.add(offset & 255);
+        } else {
+            code.add(128 + ((reg & 7) << 3));
+            this.writeDWord(code, offset);
+        }
+    }
+
+    private void emitSubRspImm(Array<int> code, int imm) {
+        code.add(72); code.add(129); code.add(236);
+        this.writeDWord(code, imm);
+    }
+
+    private void emitAddRspImm(Array<int> code, int imm) {
+        code.add(72); code.add(129); code.add(196);
+        this.writeDWord(code, imm);
+    }
+
+    // ---- 字节写入辅助 ----
+
+    private void writeDWord(Array<int> code, int value) {
+        code.add(value & 255);
+        code.add((value >> 8) & 255);
+        code.add((value >> 16) & 255);
+        code.add((value >> 24) & 255);
+    }
+
+    private void writeQWord(Array<int> code, long value) {
+        this.writeDWord(code, (int)value);
+        this.writeDWord(code, (int)(value >> 32));
+    }
+
+    // ---- 调试输出 ----
+
+    public String dumpFunction(JitCompiledFunction func) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("; JIT Function: " + func.name + "\n");
+        sb.append("; Code size: " + func.codeSize + " bytes\n");
+        sb.append("; Frame size: " + func.frameSize + " bytes\n");
+        sb.append("; Params: " + func.paramCount + "\n\n");
+
+        for (int i = 0; i < func.code.size(); i++) {
+            int rawByte = func.code.get(i);
+            int b = rawByte & 255;
+            int hi = b / 16;
+            int lo = b % 16;
+            if (hi < 10) sb.append((char)(hi + 48));
+            else sb.append((char)(hi - 10 + 97));
+            if (lo < 10) sb.append((char)(lo + 48));
+            else sb.append((char)(lo - 10 + 97));
+            if ((i + 1) % 16 == 0) sb.append("\n");
+            else sb.append(" ");
+        }
+        sb.append("\n");
+        return sb.toString();
+    }
+}

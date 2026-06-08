@@ -1,0 +1,781 @@
+package lemon.jit;
+
+// ============================================================
+// Lemon 嵌入式虚拟机 (LeVM)
+// 基于栈的虚拟机，解释执行 BytecodeModule
+//
+// VMValue 用 tag + 字段模拟联合体:
+//   tag=0: Null
+//   tag=1: Int (intValue)
+//   tag=2: Float (floatValue)
+//   tag=3: Bool (boolValue)
+//   tag=4: String (strValue)
+//   tag=5: Object (objValue)
+//   tag=6: Array (arrValue)
+//   tag=7: Map (mapValue)
+//   tag=8: Ptr (intValue 存指针)
+// ============================================================
+
+// VM 值类型标签
+class VMTag {
+    public static int NIL = 0;
+    public static int INT    = 1;
+    public static int FLOAT  = 2;
+    public static int BOOL   = 3;
+    public static int STRING = 4;
+    public static int OBJECT = 5;
+    public static int ARRAY  = 6;
+    public static int MAP    = 7;
+    public static int PTR    = 8;
+}
+
+// VM 值
+class VMValue {
+    public int tag;
+    public long intValue;
+    public double floatValue;
+    public bool boolValue;
+    public String strValue;
+    public VMObject objValue;
+    public Array<VMValue> arrValue;
+    public Array<VMMapEntry> mapValue;
+
+    public VMValue() {
+        this.tag = VMTag.NIL;
+        this.intValue = 0;
+        this.floatValue = 0.0;
+        this.boolValue = false;
+        this.strValue = null;
+        this.objValue = null;
+        this.arrValue = null;
+        this.mapValue = null;
+    }
+
+    public static VMValue makeNull() {
+        VMValue v = new VMValue();
+        v.tag = VMTag.NIL;
+        return v;
+    }
+
+    public static VMValue makeInt(long val) {
+        VMValue v = new VMValue();
+        v.tag = VMTag.INT;
+        v.intValue = val;
+        return v;
+    }
+
+    public static VMValue makeFloat(double val) {
+        VMValue v = new VMValue();
+        v.tag = VMTag.FLOAT;
+        v.floatValue = val;
+        return v;
+    }
+
+    public static VMValue makeBool(bool val) {
+        VMValue v = new VMValue();
+        v.tag = VMTag.BOOL;
+        v.boolValue = val;
+        return v;
+    }
+
+    public static VMValue makeString(String val) {
+        VMValue v = new VMValue();
+        v.tag = VMTag.STRING;
+        v.strValue = val;
+        return v;
+    }
+
+    public static VMValue makeObject(VMObject val) {
+        VMValue v = new VMValue();
+        v.tag = VMTag.OBJECT;
+        v.objValue = val;
+        return v;
+    }
+
+    public static VMValue makeArray(Array<VMValue> val) {
+        VMValue v = new VMValue();
+        v.tag = VMTag.ARRAY;
+        v.arrValue = val;
+        return v;
+    }
+
+    public static VMValue makeMap(Array<VMMapEntry> val) {
+        VMValue v = new VMValue();
+        v.tag = VMTag.MAP;
+        v.mapValue = val;
+        return v;
+    }
+
+    public long asInt() {
+        if (this.tag == VMTag.INT) return this.intValue;
+        if (this.tag == VMTag.BOOL) return this.boolValue ? 1 : 0;
+        return 0;
+    }
+
+    public double asFloat() {
+        if (this.tag == VMTag.FLOAT) return this.floatValue;
+        if (this.tag == VMTag.INT) return (double)this.intValue;
+        return 0.0;
+    }
+
+    public bool asBool() {
+        if (this.tag == VMTag.BOOL) return this.boolValue;
+        if (this.tag == VMTag.INT) return this.intValue != 0;
+        if (this.tag == VMTag.NIL) return false;
+        return true;
+    }
+
+    public String asString() {
+        if (this.tag == VMTag.STRING) return this.strValue;
+        if (this.tag == VMTag.INT) return String.intToString((int)this.intValue);
+        if (this.tag == VMTag.FLOAT) return "<float>";
+        if (this.tag == VMTag.BOOL) return this.boolValue ? "true" : "false";
+        if (this.tag == VMTag.NIL) return "null";
+        return "?";
+    }
+
+    public bool isTruthy() {
+        if (this.tag == VMTag.BOOL) return this.boolValue;
+        if (this.tag == VMTag.INT) return this.intValue != 0;
+        if (this.tag == VMTag.FLOAT) return this.floatValue != 0.0;
+        if (this.tag == VMTag.NIL) return false;
+        if (this.tag == VMTag.STRING) return this.strValue != null && this.strValue.length() > 0;
+        if (this.tag == VMTag.ARRAY) return this.arrValue != null && this.arrValue.size() > 0;
+        if (this.tag == VMTag.MAP) return this.mapValue != null && this.mapValue.size() > 0;
+        return true;
+    }
+
+    public bool equals(VMValue other) {
+        if (this.tag != other.tag) return false;
+        if (this.tag == VMTag.NIL) return true;
+        if (this.tag == VMTag.INT) return this.intValue == other.intValue;
+        if (this.tag == VMTag.FLOAT) return this.floatValue == other.floatValue;
+        if (this.tag == VMTag.BOOL) return this.boolValue == other.boolValue;
+        if (this.tag == VMTag.STRING) return String.equals(this.strValue, other.strValue);
+        return false; // 对象/数组/Map 用引用比较
+    }
+
+    public String toString() {
+        return this.asString();
+    }
+}
+
+// VM Map 条目
+class VMMapEntry {
+    public VMValue key;
+    public VMValue value;
+
+    public VMMapEntry(VMValue key, VMValue value) {
+        this.key = key;
+        this.value = value;
+    }
+}
+
+// VM 对象
+class VMObject {
+    public int classIndex;
+    public Array<VMValue> fields;
+
+    public VMObject(int classIndex, int fieldCount) {
+        this.classIndex = classIndex;
+        this.fields = new Array<VMValue>();
+        for (int i = 0; i < fieldCount; i++) {
+            this.fields.add(VMValue.makeNull());
+        }
+    }
+}
+
+// 调用帧
+class CallFrame {
+    public int funcIndex;
+    public int pc;
+    public Array<VMValue> locals;
+    public int stackBase;
+
+    public CallFrame(int funcIndex, int stackBase) {
+        this.funcIndex = funcIndex;
+        this.pc = 0;
+        this.locals = new Array<VMValue>();
+        this.stackBase = stackBase;
+    }
+}
+
+// Lemon 嵌入式虚拟机
+class LeVM {
+    private BytecodeModule module;
+    private Array<VMValue> stack;
+    private Array<CallFrame> frames;
+    private Array<VMValue> globals;
+    private bool halted;
+    private int stepCount;
+    private int maxSteps;
+
+    public LeVM(BytecodeModule module) {
+        this.module = module;
+        this.stack = new Array<VMValue>();
+        this.frames = new Array<CallFrame>();
+        this.globals = new Array<VMValue>();
+        this.halted = false;
+        this.stepCount = 0;
+        this.maxSteps = 10000000; // 10M 步上限
+    }
+
+    public void setMaxSteps(int max) {
+        this.maxSteps = max;
+    }
+
+    // ---- 运行入口 ----
+
+    public VMValue run() {
+        // 查找 main 函数
+        int mainIdx = this.findMainFunction();
+        if (mainIdx < 0) {
+            return VMValue.makeInt(1);
+        }
+
+        this.callFunction(mainIdx, new Array<VMValue>());
+
+        while (!this.halted && this.frames.size() > 0) {
+            this.step();
+            this.stepCount = this.stepCount + 1;
+            if (this.stepCount >= this.maxSteps) {
+                this.halted = true;
+            }
+        }
+
+        if (this.stack.size() > 0) {
+            return this.stack.get(this.stack.size() - 1);
+        }
+        return VMValue.makeNull();
+    }
+
+    // ---- 查找 main 函数 ----
+
+    private int findMainFunction() {
+        // 先在类方法中查找
+        for (int ci = 0; ci < this.module.classes.size(); ci++) {
+            BytecodeClass cls = this.module.classes.get(ci);
+            for (int mi = 0; mi < cls.methods.size(); mi++) {
+                BytecodeFunction func = cls.methods.get(mi);
+                String funcName = func.name;
+                if (funcName.equals("main")) {
+                    // 返回类方法索引（编码为 classIdx * 10000 + methodIdx）
+                    return ci * 10000 + mi;
+                }
+            }
+        }
+        // 在顶层函数中查找
+        for (int fi = 0; fi < this.module.functions.size(); fi++) {
+            BytecodeFunction func = this.module.functions.get(fi);
+            String funcName = func.name;
+            if (funcName.equals("main")) {
+                return fi;
+            }
+        }
+        return -1;
+    }
+
+    // ---- 函数调用 ----
+
+    private void callFunction(int funcIdx, Array<VMValue> args) {
+        BytecodeFunction func = this.getFunction(funcIdx);
+        if (func == null) return;
+
+        CallFrame frame = new CallFrame(funcIdx, this.stack.size());
+
+        // 初始化局部变量
+        for (int i = 0; i < func.localCount; i++) {
+            if (i < args.size()) {
+                frame.locals.add(args.get(i));
+            } else {
+                frame.locals.add(VMValue.makeNull());
+            }
+        }
+
+        this.frames.add(frame);
+    }
+
+    private BytecodeFunction getFunction(int idx) {
+        if (idx < 0) return null;
+        if (idx < 10000) {
+            // 顶层函数
+            if (idx < this.module.functions.size()) {
+                return this.module.functions.get(idx);
+            }
+        } else {
+            // 类方法: classIdx * 10000 + methodIdx
+            int classIdx = idx / 10000;
+            int methodIdx = idx % 10000;
+            if (classIdx < this.module.classes.size()) {
+                BytecodeClass cls = this.module.classes.get(classIdx);
+                if (methodIdx < cls.methods.size()) {
+                    return cls.methods.get(methodIdx);
+                }
+            }
+        }
+        return null;
+    }
+
+    // ---- 单步执行 ----
+
+    private void step() {
+        if (this.frames.size() == 0) return;
+
+        int frameIdx = this.frames.size() - 1;
+        CallFrame frame = this.frames.get(frameIdx);
+        BytecodeFunction func = this.getFunction(frame.funcIndex);
+        if (func == null) {
+            this.frames.remove(frameIdx);
+            return;
+        }
+
+        if (frame.pc >= func.instructions.size()) {
+            this.frames.remove(frameIdx);
+            return;
+        }
+
+        BytecodeInstruction inst = func.instructions.get(frame.pc);
+        frame.pc = frame.pc + 1;
+
+        this.executeInstruction(inst, frame);
+    }
+
+    // ---- 指令执行 ----
+
+    private void executeInstruction(BytecodeInstruction inst, CallFrame frame) {
+        int op = inst.opcode;
+        int operand = inst.operand;
+
+        // ---- 栈操作 ----
+        if (op == OpCode.NOP) {
+            // 无操作
+        } else if (op == OpCode.PUSH_NULL) {
+            this.stack.add(VMValue.makeNull());
+        } else if (op == OpCode.PUSH_TRUE) {
+            this.stack.add(VMValue.makeBool(true));
+        } else if (op == OpCode.PUSH_FALSE) {
+            this.stack.add(VMValue.makeBool(false));
+        } else if (op == OpCode.PUSH_I8 || op == OpCode.PUSH_I16 || op == OpCode.PUSH_I32) {
+            this.stack.add(VMValue.makeInt((long)operand));
+        } else if (op == OpCode.PUSH_I64) {
+            this.stack.add(VMValue.makeInt(inst.longOperand));
+        } else if (op == OpCode.PUSH_F32 || op == OpCode.PUSH_F64) {
+            this.stack.add(VMValue.makeFloat(inst.floatOperand));
+        } else if (op == OpCode.PUSH_STR) {
+            if (operand >= 0 && operand < this.module.stringPool.size()) {
+                this.stack.add(VMValue.makeString(this.module.stringPool.get(operand)));
+            } else {
+                this.stack.add(VMValue.makeString(""));
+            }
+        } else if (op == OpCode.POP) {
+            if (this.stack.size() > 0) this.stack.remove(this.stack.size() - 1);
+        } else if (op == OpCode.DUP) {
+            if (this.stack.size() > 0) {
+                VMValue top = this.stack.get(this.stack.size() - 1);
+                this.stack.add(this.cloneValue(top));
+            }
+
+        // ---- 局部变量 ----
+        } else if (op == OpCode.LOAD_LOCAL) {
+            if (operand < frame.locals.size()) {
+                this.stack.add(this.cloneValue(frame.locals.get(operand)));
+            } else {
+                this.stack.add(VMValue.makeNull());
+            }
+        } else if (op == OpCode.STORE_LOCAL) {
+            VMValue val = this.popStack();
+            while (frame.locals.size() <= operand) {
+                frame.locals.add(VMValue.makeNull());
+            }
+            frame.locals.set(operand, val);
+        } else if (op == OpCode.LOAD_THIS) {
+            if (frame.locals.size() > 0) {
+                this.stack.add(this.cloneValue(frame.locals.get(0)));
+            } else {
+                this.stack.add(VMValue.makeNull());
+            }
+        } else if (op == OpCode.LOAD_FIELD) {
+            VMValue obj = this.popStack();
+            if (obj.tag == VMTag.OBJECT && obj.objValue != null) {
+                VMObject vmObj = obj.objValue;
+                if (operand < vmObj.fields.size()) {
+                    this.stack.add(this.cloneValue(vmObj.fields.get(operand)));
+                } else {
+                    this.stack.add(VMValue.makeNull());
+                }
+            } else {
+                this.stack.add(VMValue.makeNull());
+            }
+        } else if (op == OpCode.STORE_FIELD) {
+            VMValue val = this.popStack();
+            VMValue obj = this.popStack();
+            if (obj.tag == VMTag.OBJECT && obj.objValue != null) {
+                VMObject vmObj = obj.objValue;
+                while (vmObj.fields.size() <= operand) {
+                    vmObj.fields.add(VMValue.makeNull());
+                }
+                vmObj.fields.set(operand, val);
+            }
+
+        // ---- 算术运算 ----
+        } else if (op == OpCode.IADD) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(a.asInt() + b.asInt()));
+        } else if (op == OpCode.ISUB) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(a.asInt() - b.asInt()));
+        } else if (op == OpCode.IMUL) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(a.asInt() * b.asInt()));
+        } else if (op == OpCode.IDIV) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            if (b.asInt() != 0) {
+                this.stack.add(VMValue.makeInt(a.asInt() / b.asInt()));
+            } else {
+                this.stack.add(VMValue.makeInt(0));
+            }
+        } else if (op == OpCode.IMOD) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            if (b.asInt() != 0) {
+                this.stack.add(VMValue.makeInt(a.asInt() % b.asInt()));
+            } else {
+                this.stack.add(VMValue.makeInt(0));
+            }
+        } else if (op == OpCode.INEG) {
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(-a.asInt()));
+        } else if (op == OpCode.LADD) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(a.asInt() + b.asInt()));
+        } else if (op == OpCode.LSUB) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(a.asInt() - b.asInt()));
+        } else if (op == OpCode.LMUL) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(a.asInt() * b.asInt()));
+        } else if (op == OpCode.LDIV) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            if (b.asInt() != 0) {
+                this.stack.add(VMValue.makeInt(a.asInt() / b.asInt()));
+            } else {
+                this.stack.add(VMValue.makeInt(0));
+            }
+        } else if (op == OpCode.LMOD) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            if (b.asInt() != 0) {
+                this.stack.add(VMValue.makeInt(a.asInt() % b.asInt()));
+            } else {
+                this.stack.add(VMValue.makeInt(0));
+            }
+        } else if (op == OpCode.LNEG) {
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(-a.asInt()));
+        } else if (op == OpCode.FADD || op == OpCode.DADD) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeFloat(a.asFloat() + b.asFloat()));
+        } else if (op == OpCode.FSUB || op == OpCode.DSUB) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeFloat(a.asFloat() - b.asFloat()));
+        } else if (op == OpCode.FMUL || op == OpCode.DMUL) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeFloat(a.asFloat() * b.asFloat()));
+        } else if (op == OpCode.FDIV || op == OpCode.DDIV) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            if (b.asFloat() != 0.0) {
+                this.stack.add(VMValue.makeFloat(a.asFloat() / b.asFloat()));
+            } else {
+                this.stack.add(VMValue.makeFloat(0.0));
+            }
+        } else if (op == OpCode.FNEG || op == OpCode.DNEG) {
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeFloat(-a.asFloat()));
+
+        // ---- 位运算 ----
+        } else if (op == OpCode.IAND) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(a.asInt() & b.asInt()));
+        } else if (op == OpCode.IOR) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(a.asInt() | b.asInt()));
+        } else if (op == OpCode.IXOR) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(a.asInt() ^ b.asInt()));
+        } else if (op == OpCode.ISHL) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(a.asInt() << (int)b.asInt()));
+        } else if (op == OpCode.ISHR) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(a.asInt() >> (int)b.asInt()));
+        } else if (op == OpCode.INOT) {
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(~a.asInt()));
+        } else if (op == OpCode.LAND) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(a.asInt() & b.asInt()));
+        } else if (op == OpCode.LOR) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt(a.asInt() | b.asInt()));
+
+        // ---- 比较运算 ----
+        } else if (op == OpCode.ICMP_EQ || op == OpCode.LCMP_EQ || op == OpCode.ACMP_EQ) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeBool(a.equals(b)));
+        } else if (op == OpCode.ICMP_NE || op == OpCode.LCMP_NE || op == OpCode.ACMP_NE) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeBool(!a.equals(b)));
+        } else if (op == OpCode.ICMP_LT) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeBool(a.asInt() < b.asInt()));
+        } else if (op == OpCode.ICMP_GT) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeBool(a.asInt() > b.asInt()));
+        } else if (op == OpCode.ICMP_LE) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeBool(a.asInt() <= b.asInt()));
+        } else if (op == OpCode.ICMP_GE) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeBool(a.asInt() >= b.asInt()));
+        } else if (op == OpCode.FCMP_EQ || op == OpCode.DCMP_EQ) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeBool(a.asFloat() == b.asFloat()));
+        } else if (op == OpCode.FCMP_LT || op == OpCode.DCMP_LT) {
+            VMValue b = this.popStack();
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeBool(a.asFloat() < b.asFloat()));
+
+        // ---- 类型转换 ----
+        } else if (op == OpCode.I2L || op == OpCode.I2F || op == OpCode.I2D) {
+            // int -> long/float/double (值不变，只改标签)
+            VMValue a = this.popStack();
+            if (op == OpCode.I2L) this.stack.add(VMValue.makeInt(a.asInt()));
+            else this.stack.add(VMValue.makeFloat(a.asFloat()));
+        } else if (op == OpCode.L2I) {
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt((long)(int)a.asInt()));
+        } else if (op == OpCode.L2F || op == OpCode.L2D) {
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeFloat(a.asFloat()));
+        } else if (op == OpCode.F2I || op == OpCode.D2I) {
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt((long)a.asFloat()));
+        } else if (op == OpCode.F2L || op == OpCode.D2L) {
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeInt((long)a.asFloat()));
+        } else if (op == OpCode.F2D || op == OpCode.D2F) {
+            VMValue a = this.popStack();
+            this.stack.add(VMValue.makeFloat(a.asFloat()));
+
+        // ---- 控制流 ----
+        } else if (op == OpCode.JMP) {
+            frame.pc = operand;
+        } else if (op == OpCode.JMP_TRUE) {
+            VMValue val = this.popStack();
+            if (val.isTruthy()) frame.pc = operand;
+        } else if (op == OpCode.JMP_FALSE) {
+            VMValue val = this.popStack();
+            if (!val.isTruthy()) frame.pc = operand;
+        } else if (op == OpCode.CALL) {
+            Array<VMValue> callArgs = new Array<VMValue>();
+            for (int i = 0; i < operand; i++) {
+                if (this.stack.size() > 0) {
+                    callArgs.add(this.popStack());
+                }
+            }
+            // 反转参数顺序
+            Array<VMValue> reversed = new Array<VMValue>();
+            for (int i = callArgs.size() - 1; i >= 0; i--) {
+                reversed.add(callArgs.get(i));
+            }
+            this.callFunction(inst.operand, reversed);
+        } else if (op == OpCode.CALL_VIRT) {
+            // 虚方法调用: operand = vtable index
+            // 栈上: self, arg1, arg2, ...
+            // 简化: 直接从对象查找方法
+            VMValue self_ = this.popStack();
+            if (self_.tag == VMTag.OBJECT && self_.objValue != null) {
+                int classIdx = self_.objValue.classIndex;
+                if (classIdx < this.module.classes.size()) {
+                    BytecodeClass cls = this.module.classes.get(classIdx);
+                    if (operand < cls.methods.size()) {
+                        int methodIdx = classIdx * 10000 + operand;
+                        Array<VMValue> callArgs = new Array<VMValue>();
+                        callArgs.add(self_);
+                        this.callFunction(methodIdx, callArgs);
+                    }
+                }
+            }
+        } else if (op == OpCode.RET) {
+            VMValue retVal = this.popStack();
+            this.frames.remove(this.frames.size() - 1);
+            this.stack.add(retVal);
+        } else if (op == OpCode.RET_VOID) {
+            this.frames.remove(this.frames.size() - 1);
+            this.stack.add(VMValue.makeNull());
+
+        // ---- 对象操作 ----
+        } else if (op == OpCode.NEW_OBJ) {
+            if (operand < this.module.classes.size()) {
+                BytecodeClass cls = this.module.classes.get(operand);
+                VMObject obj = new VMObject(operand, cls.fieldNames.size());
+                this.stack.add(VMValue.makeObject(obj));
+            } else {
+                this.stack.add(VMValue.makeNull());
+            }
+        } else if (op == OpCode.NEW_ARR) {
+            VMValue len = this.popStack();
+            int arrLen = (int)len.asInt();
+            if (arrLen < 0) arrLen = 0;
+            Array<VMValue> arr = new Array<VMValue>();
+            for (int i = 0; i < arrLen; i++) {
+                arr.add(VMValue.makeNull());
+            }
+            this.stack.add(VMValue.makeArray(arr));
+        } else if (op == OpCode.ARR_LEN) {
+            VMValue arr = this.popStack();
+            if (arr.tag == VMTag.ARRAY && arr.arrValue != null) {
+                this.stack.add(VMValue.makeInt((long)arr.arrValue.size()));
+            } else {
+                this.stack.add(VMValue.makeInt(0));
+            }
+        } else if (op == OpCode.ARR_GET) {
+            VMValue idx = this.popStack();
+            VMValue arr = this.popStack();
+            if (arr.tag == VMTag.ARRAY && arr.arrValue != null) {
+                int i = (int)idx.asInt();
+                if (i >= 0 && i < arr.arrValue.size()) {
+                    this.stack.add(this.cloneValue(arr.arrValue.get(i)));
+                } else {
+                    this.stack.add(VMValue.makeNull());
+                }
+            } else {
+                this.stack.add(VMValue.makeNull());
+            }
+        } else if (op == OpCode.ARR_SET) {
+            VMValue val = this.popStack();
+            VMValue idx = this.popStack();
+            VMValue arr = this.popStack();
+            if (arr.tag == VMTag.ARRAY && arr.arrValue != null) {
+                int i = (int)idx.asInt();
+                if (i >= 0 && i < arr.arrValue.size()) {
+                    arr.arrValue.set(i, val);
+                }
+            }
+            this.stack.add(arr);
+        } else if (op == OpCode.INSTANCEOF) {
+            VMValue val = this.popStack();
+            bool result = false;
+            if (operand < this.module.classes.size()) {
+                BytecodeClass cls = this.module.classes.get(operand);
+                String typeName = cls.name;
+                if (val.tag == VMTag.OBJECT && val.objValue != null) {
+                    int objClassIdx = val.objValue.classIndex;
+                    if (objClassIdx < this.module.classes.size()) {
+                        BytecodeClass objClass = this.module.classes.get(objClassIdx);
+                        result = String.equals(objClass.name, typeName);
+                    }
+                }
+            }
+            this.stack.add(VMValue.makeBool(result));
+        } else if (op == OpCode.CHECKCAST) {
+            // 类型转换检查: 暂时直接通过
+        }
+
+        // ---- 调试信息 ----
+        else if (op == OpCode.LINE_NUM || op == OpCode.FILE_MARK) {
+            // 忽略调试信息
+        }
+    }
+
+    // ---- 辅助方法 ----
+
+    private VMValue popStack() {
+        if (this.stack.size() > 0) {
+            return this.stack.remove(this.stack.size() - 1);
+        }
+        return VMValue.makeNull();
+    }
+
+    private VMValue cloneValue(VMValue v) {
+        // 简化: 直接返回（不深拷贝）
+        return v;
+    }
+
+    // ---- 状态查询 ----
+
+    public int getStepCount() {
+        return this.stepCount;
+    }
+
+    public bool isHalted() {
+        return this.halted;
+    }
+
+    public int getStackSize() {
+        return this.stack.size();
+    }
+
+    public int getFrameCount() {
+        return this.frames.size();
+    }
+
+    // ---- 调试输出 ----
+
+    public String dumpStack() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Stack (" + this.stack.size() + "): ");
+        int limit = this.stack.size();
+        if (limit > 10) limit = 10;
+        for (int i = 0; i < limit; i++) {
+            if (i > 0) sb.append(", ");
+            VMValue v = this.stack.get(i);
+            sb.append(v.asString());
+        }
+        if (this.stack.size() > 10) sb.append(" ...");
+        return sb.toString();
+    }
+
+    public String dumpState() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("LeVM State:\n");
+        sb.append("  Steps: " + this.stepCount + "\n");
+        sb.append("  Stack: " + this.stack.size() + " items\n");
+        sb.append("  Frames: " + this.frames.size() + "\n");
+        sb.append("  Halted: " + (this.halted ? "true" : "false") + "\n");
+        if (this.frames.size() > 0) {
+            CallFrame frame = this.frames.get(this.frames.size() - 1);
+            BytecodeFunction func = this.getFunction(frame.funcIndex);
+            if (func != null) {
+                sb.append("  Current: " + func.name + " pc=" + frame.pc + "\n");
+            }
+        }
+        return sb.toString();
+    }
+}

@@ -1,0 +1,353 @@
+package lemon.ast;
+
+import lemon.parser.AST;
+
+// ============================================================
+// 执行策略决策
+// 分析每个方法/函数的执行策略（AOT/JIT/AotWithProfile）
+//
+// 策略:
+//   AOT: 静态编译为原生代码（适用于热路径、计算密集型函数）
+//   JIT: 运行时编译（适用于动态特性多、启动速度不敏感的函数）
+//   INTERPRET: 纯解释执行（适用于冷路径、启动代码）
+//   HYBRID: AOT + JIT 混合（先解释，热点后 JIT 编译）
+// ============================================================
+
+// 执行策略枚举
+class ExecutionStrategyKind {
+    public static int AOT = 0;       // 静态编译
+    public static int JIT = 1;       // 即时编译
+    public static int INTERPRET = 2; // 解释执行
+    public static int HYBRID = 3;    // 混合执行
+}
+
+// 函数执行策略
+class FunctionStrategy {
+    public String className;
+    public String functionName;
+    public int strategy;
+    public int estimatedComplexity;  // 0-100 估算复杂度
+    public int estimatedCallFreq;    // 估算调用频率
+    public bool hasDynamicDispatch;  // 是否有虚方法调用
+    public bool isEntryPoint;        // 是否是入口点
+
+    public FunctionStrategy(String className, String functionName) {
+        this.className = className;
+        this.functionName = functionName;
+        this.strategy = ExecutionStrategyKind.HYBRID;
+        this.estimatedComplexity = 50;
+        this.estimatedCallFreq = 50;
+        this.hasDynamicDispatch = false;
+        this.isEntryPoint = false;
+    }
+}
+
+// 执行策略分析器
+class ExecutionStrategyAnalyzer {
+    private Array<FunctionStrategy> strategies;
+
+    public ExecutionStrategyAnalyzer() {
+        this.strategies = new Array<FunctionStrategy>();
+    }
+
+    // ---- 分析整个程序 ----
+
+    public void analyze(Program program) {
+        // 分析顶层声明
+        for (int i = 0; i < program.declarations.size(); i++) {
+            Declaration decl = program.declarations.get(i);
+            if (decl.kind == DeclKind.Function && decl.functionDecl != null) {
+                this.analyzeFunction("", decl.functionDecl);
+            } else if (decl.kind == DeclKind.Class && decl.classDecl != null) {
+                ClassDecl cls = decl.classDecl;
+                for (int j = 0; j < cls.members.size(); j++) {
+                    ClassMember member = cls.members.get(j);
+                    if (member.kind == ClassMemberKind.Method && member.method != null) {
+                        this.analyzeMethod(cls.name, member.method);
+                    } else if (member.kind == ClassMemberKind.Constructor && member.constructor != null) {
+                        this.analyzeCtor(cls.name, member.constructor);
+                    }
+                }
+            }
+        }
+
+        // 标记入口点
+        this.markEntryPoints();
+
+        // 决定策略
+        this.decideStrategies();
+    }
+
+    private void analyzeFunction(String className, FunctionDecl func) {
+        FunctionStrategy strategy = new FunctionStrategy(className, func.name);
+        if (func.body != null) {
+            this.analyzeBlock(func.body, strategy);
+        }
+        this.strategies.add(strategy);
+    }
+
+    private void analyzeMethod(String className, MethodDecl method) {
+        FunctionStrategy strategy = new FunctionStrategy(className, method.name);
+        if (method.body != null) {
+            this.analyzeBlock(method.body, strategy);
+        }
+
+        // 检查是否是静态方法
+        bool isStatic = false;
+        if (method.modifiers != null) {
+            for (int i = 0; i < method.modifiers.size(); i++) {
+                if (method.modifiers.get(i) == MethodModifier.Static) {
+                    isStatic = true;
+                }
+            }
+        }
+        if (!isStatic) {
+            strategy.hasDynamicDispatch = true;
+        }
+
+        this.strategies.add(strategy);
+    }
+
+    private void analyzeCtor(String className, ConstructorDecl ctor) {
+        FunctionStrategy strategy = new FunctionStrategy(className, "<init>");
+        if (ctor.body != null) {
+            this.analyzeBlock(ctor.body, strategy);
+        }
+        this.strategies.add(strategy);
+    }
+
+    private void analyzeBlock(Block block, FunctionStrategy strategy) {
+        if (block == null) return;
+        this.analyzeStmts(block.statements, strategy);
+    }
+
+    private void analyzeStmts(Array<Stmt> stmts, FunctionStrategy strategy) {
+        if (stmts == null) return;
+        for (int i = 0; i < stmts.size(); i++) {
+            this.analyzeStatement(stmts.get(i), strategy);
+        }
+    }
+
+    private void analyzeStatement(Stmt stmt, FunctionStrategy strategy) {
+        if (stmt == null) return;
+        int kind = stmt.kind;
+
+        if (kind == StmtKind.If) {
+            strategy.estimatedComplexity = strategy.estimatedComplexity + 5;
+            if (stmt.thenBranch != null) {
+                this.analyzeStatement(stmt.thenBranch, strategy);
+            }
+            if (stmt.elseBranch != null) {
+                this.analyzeStatement(stmt.elseBranch, strategy);
+            }
+        } else if (kind == StmtKind.While) {
+            strategy.estimatedComplexity = strategy.estimatedComplexity + 15;
+            strategy.estimatedCallFreq = strategy.estimatedCallFreq + 20;
+            if (stmt.body != null) {
+                this.analyzeStatement(stmt.body, strategy);
+            }
+        } else if (kind == StmtKind.For) {
+            strategy.estimatedComplexity = strategy.estimatedComplexity + 15;
+            strategy.estimatedCallFreq = strategy.estimatedCallFreq + 20;
+            if (stmt.body != null) {
+                this.analyzeStatement(stmt.body, strategy);
+            }
+        } else if (kind == StmtKind.ForEach) {
+            strategy.estimatedComplexity = strategy.estimatedComplexity + 15;
+            strategy.estimatedCallFreq = strategy.estimatedCallFreq + 20;
+            if (stmt.body != null) {
+                this.analyzeStatement(stmt.body, strategy);
+            }
+        } else if (kind == StmtKind.Return) {
+            if (stmt.returnValue != null) {
+                this.analyzeExpression(stmt.returnValue, strategy);
+            }
+        } else if (kind == StmtKind.Expr) {
+            if (stmt.expr != null) {
+                this.analyzeExpression(stmt.expr, strategy);
+            }
+        } else if (kind == StmtKind.VarDecl) {
+            if (stmt.varDecl != null && stmt.varDecl.initializer != null) {
+                this.analyzeExpression(stmt.varDecl.initializer, strategy);
+            }
+        } else if (kind == StmtKind.Block) {
+            this.analyzeStmts(stmt.statements, strategy);
+        }
+    }
+
+    private void analyzeExpression(Expr expr, FunctionStrategy strategy) {
+        if (expr == null) return;
+        int kind = expr.kind;
+
+        if (kind == ExprKind.BinaryOp) {
+            this.analyzeExpression(expr.left, strategy);
+            this.analyzeExpression(expr.right, strategy);
+            strategy.estimatedComplexity = strategy.estimatedComplexity + 1;
+        } else if (kind == ExprKind.Call) {
+            strategy.estimatedCallFreq = strategy.estimatedCallFreq + 5;
+            if (expr.args != null) {
+                for (int i = 0; i < expr.args.size(); i++) {
+                    this.analyzeExpression(expr.args.get(i), strategy);
+                }
+            }
+        } else if (kind == ExprKind.MethodCall) {
+            strategy.estimatedCallFreq = strategy.estimatedCallFreq + 5;
+            strategy.hasDynamicDispatch = true;
+            if (expr.receiver != null) {
+                this.analyzeExpression(expr.receiver, strategy);
+            }
+            if (expr.args != null) {
+                for (int i = 0; i < expr.args.size(); i++) {
+                    this.analyzeExpression(expr.args.get(i), strategy);
+                }
+            }
+        } else if (kind == ExprKind.FieldAccess) {
+            strategy.estimatedComplexity = strategy.estimatedComplexity + 1;
+            if (expr.receiver != null) {
+                this.analyzeExpression(expr.receiver, strategy);
+            }
+        } else if (kind == ExprKind.New) {
+            strategy.estimatedComplexity = strategy.estimatedComplexity + 3;
+            if (expr.args != null) {
+                for (int i = 0; i < expr.args.size(); i++) {
+                    this.analyzeExpression(expr.args.get(i), strategy);
+                }
+            }
+        } else if (kind == ExprKind.UnaryOp) {
+            this.analyzeExpression(expr.operand, strategy);
+        } else if (kind == ExprKind.Assignment) {
+            this.analyzeExpression(expr.target, strategy);
+            this.analyzeExpression(expr.value, strategy);
+        } else if (kind == ExprKind.ArrayAccess) {
+            this.analyzeExpression(expr.receiver, strategy);
+            this.analyzeExpression(expr.index, strategy);
+        }
+    }
+
+    // ---- 标记入口点 ----
+
+    private void markEntryPoints() {
+        for (int i = 0; i < this.strategies.size(); i++) {
+            FunctionStrategy s = this.strategies.get(i);
+            if (s.functionName.equals("main")) {
+                s.isEntryPoint = true;
+            }
+        }
+    }
+
+    // ---- 决定策略 ----
+
+    private void decideStrategies() {
+        for (int i = 0; i < this.strategies.size(); i++) {
+            FunctionStrategy s = this.strategies.get(i);
+
+            // 入口点: AOT
+            if (s.isEntryPoint) {
+                s.strategy = ExecutionStrategyKind.AOT;
+                continue;
+            }
+
+            // 高复杂度 + 高频率: AOT
+            if (s.estimatedComplexity > 70 && s.estimatedCallFreq > 70) {
+                s.strategy = ExecutionStrategyKind.AOT;
+                continue;
+            }
+
+            // 有动态分派: HYBRID
+            if (s.hasDynamicDispatch) {
+                s.strategy = ExecutionStrategyKind.HYBRID;
+                continue;
+            }
+
+            // 低复杂度: INTERPRET
+            if (s.estimatedComplexity < 20) {
+                s.strategy = ExecutionStrategyKind.INTERPRET;
+                continue;
+            }
+
+            // 默认: HYBRID
+            s.strategy = ExecutionStrategyKind.HYBRID;
+        }
+    }
+
+    // ---- 查询策略 ----
+
+    public FunctionStrategy getStrategy(String className, String functionName) {
+        for (int i = 0; i < this.strategies.size(); i++) {
+            FunctionStrategy s = this.strategies.get(i);
+            if (s.className.equals(className) && s.functionName.equals(functionName)) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    public int getStrategyKind(String className, String functionName) {
+        FunctionStrategy s = this.getStrategy(className, functionName);
+        if (s != null) return s.strategy;
+        return ExecutionStrategyKind.HYBRID;
+    }
+
+    public Array<FunctionStrategy> getStrategiesByKind(int kind) {
+        Array<FunctionStrategy> result = new Array<FunctionStrategy>();
+        for (int i = 0; i < this.strategies.size(); i++) {
+            FunctionStrategy fs = this.strategies.get(i);
+            if (fs.strategy == kind) {
+                result.add(fs);
+            }
+        }
+        return result;
+    }
+
+    // ---- 统计 ----
+
+    public int getAotCount() {
+        Array<FunctionStrategy> arr = this.getStrategiesByKind(ExecutionStrategyKind.AOT);
+        return arr.size();
+    }
+
+    public int getJitCount() {
+        Array<FunctionStrategy> arr = this.getStrategiesByKind(ExecutionStrategyKind.JIT);
+        return arr.size();
+    }
+
+    public int getInterpretCount() {
+        Array<FunctionStrategy> arr = this.getStrategiesByKind(ExecutionStrategyKind.INTERPRET);
+        return arr.size();
+    }
+
+    public int getHybridCount() {
+        Array<FunctionStrategy> arr = this.getStrategiesByKind(ExecutionStrategyKind.HYBRID);
+        return arr.size();
+    }
+
+    // ---- 调试输出 ----
+
+    public String dump() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("; Execution Strategy Analysis\n");
+        sb.append("; Total: " + this.strategies.size() + " functions\n");
+        sb.append("; AOT: " + this.getAotCount() + ", JIT: " + this.getJitCount());
+        sb.append(", INTERPRET: " + this.getInterpretCount() + ", HYBRID: " + this.getHybridCount() + "\n\n");
+
+        for (int i = 0; i < this.strategies.size(); i++) {
+            FunctionStrategy s = this.strategies.get(i);
+            String prefix = s.className.length() > 0 ? s.className + "." : "";
+            String stratStr = this.strategyName(s.strategy);
+            sb.append("  " + prefix + s.functionName + " -> " + stratStr);
+            sb.append(" (complexity=" + s.estimatedComplexity + ", freq=" + s.estimatedCallFreq);
+            sb.append(", dispatch=" + (s.hasDynamicDispatch ? "dynamic" : "static"));
+            sb.append(")\n");
+        }
+
+        return sb.toString();
+    }
+
+    private String strategyName(int kind) {
+        if (kind == ExecutionStrategyKind.AOT) return "AOT";
+        if (kind == ExecutionStrategyKind.JIT) return "JIT";
+        if (kind == ExecutionStrategyKind.INTERPRET) return "INTERPRET";
+        if (kind == ExecutionStrategyKind.HYBRID) return "HYBRID";
+        return "?";
+    }
+}

@@ -1,0 +1,689 @@
+package lemon.ast;
+
+import lemon.parser.AST;
+
+// ============================================================
+// AST 优化器
+// 基于 lemonc/src/ast/optimizer.rs 的 Rust 实现
+// 功能：常量折叠、常量传播、死代码消除、代数化简
+//
+// 注意：由于 Lemon 编译器 C 代码生成器的限制：
+// 1. LemonArray_get 返回 void*，需要显式类型转换
+// 2. 不能对 void* 返回值链式调用方法
+// ============================================================
+
+// 常量值类型
+class ConstValue {
+    public static int Int = 0;
+    public static int Float = 1;
+    public static int Bool = 2;
+    public static int Null = 3;
+
+    public int kind;
+    public long longVal;
+    public double doubleVal;
+    public bool boolVal;
+
+    public ConstValue(int k) {
+        this.kind = k;
+        this.longVal = 0;
+        this.doubleVal = 0.0;
+        this.boolVal = false;
+    }
+
+    public static ConstValue makeInt(long v) {
+        ConstValue c = new ConstValue(ConstValue.Int);
+        c.longVal = v;
+        return c;
+    }
+
+    public static ConstValue makeFloat(double v) {
+        ConstValue c = new ConstValue(ConstValue.Float);
+        c.doubleVal = v;
+        return c;
+    }
+
+    public static ConstValue makeBool(bool v) {
+        ConstValue c = new ConstValue(ConstValue.Bool);
+        c.boolVal = v;
+        return c;
+    }
+
+    public static ConstValue makeNull() {
+        return new ConstValue(ConstValue.Null);
+    }
+}
+
+// 优化器统计信息
+class OptimizerStats {
+    public int constantsFolded;
+    public int deadCodeRemoved;
+    public int constantsPropagated;
+
+    public OptimizerStats() {
+        this.constantsFolded = 0;
+        this.deadCodeRemoved = 0;
+        this.constantsPropagated = 0;
+    }
+}
+
+// AST 优化器
+class Optimizer {
+    private Map<String, ConstValue> constantEnv;
+    private OptimizerStats stats;
+
+    public Optimizer() {
+        this.constantEnv = new Map<String, ConstValue>();
+        this.stats = new OptimizerStats();
+    }
+
+    public OptimizerStats getStats() {
+        return this.stats;
+    }
+
+    // ---- 主入口 ----
+
+    public void optimize(Program program) {
+        for (int i = 0; i < program.declarations.size(); i++) {
+            Declaration decl = program.declarations.get(i);
+            if (decl.kind == DeclKind.Class) {
+                this.optimizeClass(decl.classDecl);
+            } else if (decl.kind == DeclKind.Function) {
+                this.optimizeFunction(decl.functionDecl);
+            }
+        }
+    }
+
+    // ---- 类和函数优化 ----
+
+    private void optimizeClass(ClassDecl class_) {
+        for (int i = 0; i < class_.members.size(); i++) {
+            ClassMember member = class_.members.get(i);
+            if (member.kind == ClassMemberKind.Method) {
+                MethodDecl method = member.method;
+                if (method.body != null) {
+                    this.optimizeBlock(method.body);
+                }
+            } else if (member.kind == ClassMemberKind.Constructor) {
+                this.optimizeBlock(member.constructor.body);
+            } else if (member.kind == ClassMemberKind.Destructor) {
+                this.optimizeBlock(member.destructor.body);
+            } else if (member.kind == ClassMemberKind.Field) {
+                VarDecl field = member.field;
+                if (field.initializer != null) {
+                    this.optimizeExpr(field.initializer);
+                }
+            }
+        }
+    }
+
+    private void optimizeFunction(FunctionDecl func) {
+        this.optimizeBlock(func.body);
+    }
+
+    // ---- 块优化 ----
+
+    private void optimizeBlock(Block block) {
+        int i = 0;
+        while (i < block.statements.size()) {
+            Stmt stmt = block.statements.get(i);
+            this.optimizeStmt(stmt);
+            if (this.isDeadStmt(stmt)) {
+                block.statements.removeAt(i);
+                this.stats.deadCodeRemoved = this.stats.deadCodeRemoved + 1;
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+
+    // ---- 语句优化 ----
+
+    private void optimizeStmt(Stmt stmt) {
+        if (stmt.kind == StmtKind.VarDecl) {
+            if (stmt.varDecl.initializer != null) {
+                this.optimizeExpr(stmt.varDecl.initializer);
+            }
+            // 常量传播：记录常量变量
+            if (stmt.varDecl.initializer != null) {
+                ConstValue val = this.evalConst(stmt.varDecl.initializer);
+                if (val != null) {
+                    this.constantEnv.put(stmt.varDecl.name, val);
+                }
+            }
+        } else if (stmt.kind == StmtKind.Return) {
+            if (stmt.returnValue != null) {
+                this.optimizeExpr(stmt.returnValue);
+            }
+        } else if (stmt.kind == StmtKind.Expr) {
+            this.optimizeExpr(stmt.expr);
+        } else if (stmt.kind == StmtKind.If) {
+            this.optimizeExpr(stmt.condition);
+            // 死代码消除：if (true) / if (false)
+            if (stmt.condition.kind == ExprKind.BoolLiteral) {
+                this.stats.deadCodeRemoved = this.stats.deadCodeRemoved + 1;
+                if (stmt.condition.boolValue) {
+                    // if (true) → then branch
+                    stmt.kind = stmt.thenBranch.kind;
+                    this.copyStmtFields(stmt, stmt.thenBranch);
+                } else if (stmt.elseBranch != null) {
+                    // if (false) → else branch
+                    stmt.kind = stmt.elseBranch.kind;
+                    this.copyStmtFields(stmt, stmt.elseBranch);
+                } else {
+                    // if (false) with no else → empty block
+                    stmt.kind = StmtKind.Block;
+                    stmt.statements = new Array<Stmt>();
+                }
+            } else {
+                this.optimizeStmt(stmt.thenBranch);
+                if (stmt.elseBranch != null) {
+                    this.optimizeStmt(stmt.elseBranch);
+                }
+            }
+        } else if (stmt.kind == StmtKind.While) {
+            // 收集循环体内赋值的变量，使常量环境失效
+            this.invalidateAssignedVarsStmt(stmt.body);
+            this.optimizeExpr(stmt.condition);
+            if (stmt.condition.kind == ExprKind.BoolLiteral && !stmt.condition.boolValue) {
+                // while (false) → 删除
+                this.stats.deadCodeRemoved = this.stats.deadCodeRemoved + 1;
+                stmt.kind = StmtKind.Block;
+                stmt.statements = new Array<Stmt>();
+            } else {
+                this.optimizeStmt(stmt.body);
+            }
+        } else if (stmt.kind == StmtKind.For) {
+            if (stmt.init != null) {
+                this.optimizeStmt(stmt.init);
+            }
+            // 收集循环体内赋值的变量
+            this.invalidateAssignedVarsStmt(stmt.body);
+            if (stmt.update != null) {
+                this.invalidateAssignedVarsExpr(stmt.update);
+            }
+            if (stmt.forCond != null) {
+                this.optimizeExpr(stmt.forCond);
+            }
+            if (stmt.update != null) {
+                this.optimizeExpr(stmt.update);
+            }
+            this.optimizeStmt(stmt.body);
+        } else if (stmt.kind == StmtKind.Block) {
+            this.optimizeBlock(new Block(stmt.statements));
+        } else if (stmt.kind == StmtKind.Try) {
+            this.optimizeBlock(stmt.tryBlock);
+            for (int ci = 0; ci < stmt.catchClauses.size(); ci++) {
+                CatchClause catch_ = stmt.catchClauses.get(ci);
+                this.optimizeBlock(catch_.body);
+            }
+            if (stmt.finallyBlock != null) {
+                this.optimizeBlock(stmt.finallyBlock);
+            }
+        } else if (stmt.kind == StmtKind.Switch) {
+            this.optimizeExpr(stmt.switchExpr);
+            for (int ci = 0; ci < stmt.cases.size(); ci++) {
+                SwitchCase case_ = stmt.cases.get(ci);
+                for (int pi = 0; pi < case_.patterns.size(); pi++) {
+                    this.optimizeExpr(case_.patterns.get(pi));
+                }
+                this.optimizeBlock(case_.body);
+            }
+            if (stmt.defaultBlock != null) {
+                this.optimizeBlock(stmt.defaultBlock);
+            }
+        } else if (stmt.kind == StmtKind.ForEach) {
+            this.optimizeExpr(stmt.forEachIterable);
+            this.optimizeStmt(stmt.body);
+        }
+        // Break, Continue: 无需优化
+    }
+
+    // ---- 表达式优化 ----
+
+    private void optimizeExpr(Expr expr) {
+        if (expr == null) return;
+
+        if (expr.kind == ExprKind.BinaryOp) {
+            this.optimizeExpr(expr.left);
+            this.optimizeExpr(expr.right);
+            Expr folded = this.tryFoldBinary(expr.opValue, expr.left, expr.right);
+            if (folded != null) {
+                this.stats.constantsFolded = this.stats.constantsFolded + 1;
+                this.copyExprFields(expr, folded);
+            }
+        } else if (expr.kind == ExprKind.UnaryOp) {
+            // 自增/自减运算符有副作用，不优化操作数
+            if (expr.opValue == UnaryOp.PreInc || expr.opValue == UnaryOp.PreDec ||
+                expr.opValue == UnaryOp.PostInc || expr.opValue == UnaryOp.PostDec) {
+                return;
+            }
+            this.optimizeExpr(expr.operand);
+            Expr folded = this.tryFoldUnary(expr.opValue, expr.operand);
+            if (folded != null) {
+                this.stats.constantsFolded = this.stats.constantsFolded + 1;
+                this.copyExprFields(expr, folded);
+            }
+        } else if (expr.kind == ExprKind.Ternary) {
+            this.optimizeExpr(expr.condition);
+            if (expr.condition.kind == ExprKind.BoolLiteral) {
+                this.stats.constantsFolded = this.stats.constantsFolded + 1;
+                if (expr.condition.boolValue) {
+                    this.copyExprFields(expr, expr.thenExpr);
+                } else {
+                    this.copyExprFields(expr, expr.elseExpr);
+                }
+            } else {
+                this.optimizeExpr(expr.thenExpr);
+                this.optimizeExpr(expr.elseExpr);
+            }
+        } else if (expr.kind == ExprKind.Assignment) {
+            // 赋值时清除常量环境
+            if (expr.target.kind == ExprKind.Variable) {
+                this.constantEnv.remove(expr.target.strValue);
+            }
+            // 不对赋值目标做常量传播
+            if (expr.target.kind == ExprKind.FieldAccess) {
+                this.optimizeExpr(expr.target.receiver);
+            } else if (expr.target.kind == ExprKind.ArrayAccess) {
+                this.optimizeExpr(expr.target.receiver);
+                this.optimizeExpr(expr.target.index);
+            }
+            this.optimizeExpr(expr.value);
+        } else if (expr.kind == ExprKind.Call) {
+            this.optimizeExpr(expr.callee);
+            for (int i = 0; i < expr.args.size(); i++) {
+                this.optimizeExpr(expr.args.get(i));
+            }
+        } else if (expr.kind == ExprKind.MethodCall) {
+            this.optimizeExpr(expr.receiver);
+            for (int i = 0; i < expr.args.size(); i++) {
+                this.optimizeExpr(expr.args.get(i));
+            }
+        } else if (expr.kind == ExprKind.FieldAccess) {
+            this.optimizeExpr(expr.receiver);
+        } else if (expr.kind == ExprKind.ArrayAccess) {
+            this.optimizeExpr(expr.receiver);
+            this.optimizeExpr(expr.index);
+        } else if (expr.kind == ExprKind.New) {
+            for (int i = 0; i < expr.args.size(); i++) {
+                this.optimizeExpr(expr.args.get(i));
+            }
+        } else if (expr.kind == ExprKind.Delete) {
+            this.optimizeExpr(expr.operand);
+        } else if (expr.kind == ExprKind.Cast) {
+            this.optimizeExpr(expr.operand);
+        } else if (expr.kind == ExprKind.InstanceOf) {
+            this.optimizeExpr(expr.receiver);
+        } else if (expr.kind == ExprKind.Variable) {
+            // 常量传播
+            ConstValue val = this.constantEnv.get(expr.strValue);
+            if (val != null) {
+                this.stats.constantsPropagated = this.stats.constantsPropagated + 1;
+                if (val.kind == ConstValue.Int) {
+                    expr.kind = ExprKind.IntegerLiteral;
+                    expr.longValue = val.longVal;
+                } else if (val.kind == ConstValue.Float) {
+                    expr.kind = ExprKind.FloatLiteral;
+                    expr.doubleValue = val.doubleVal;
+                } else if (val.kind == ConstValue.Bool) {
+                    expr.kind = ExprKind.BoolLiteral;
+                    expr.boolValue = val.boolVal;
+                } else if (val.kind == ConstValue.Null) {
+                    expr.kind = ExprKind.Null;
+                }
+            }
+        } else if (expr.kind == ExprKind.TypeId) {
+            this.optimizeExpr(expr.operand);
+        } else if (expr.kind == ExprKind.Throw) {
+            this.optimizeExpr(expr.operand);
+        } else if (expr.kind == ExprKind.Lambda) {
+            if (expr.lambdaBody != null) {
+                if (expr.lambdaBody.kind == LambdaBodyKind.Expr) {
+                    this.optimizeExpr(expr.lambdaBody.expr);
+                } else if (expr.lambdaBody.kind == LambdaBodyKind.Block) {
+                    this.optimizeBlock(expr.lambdaBody.block);
+                }
+            }
+        }
+        // IntegerLiteral, FloatLiteral, StringLiteral, CharLiteral,
+        // BoolLiteral, Null, This, Super, Sizeof, Match: 无需优化
+    }
+
+    // ---- 常量折叠 ----
+
+    private Expr tryFoldBinary(int op, Expr left, Expr right) {
+        // 整数 + 整数
+        if (left.kind == ExprKind.IntegerLiteral && right.kind == ExprKind.IntegerLiteral) {
+            long result = this.evalIntBinop(op, left.longValue, right.longValue);
+            if (op == BinaryOp.Div && right.longValue == 0) return null;
+            if (op == BinaryOp.Mod && right.longValue == 0) return null;
+            // 比较运算符返回 bool
+            if (op == BinaryOp.Eq || op == BinaryOp.Ne || op == BinaryOp.Lt ||
+                op == BinaryOp.Gt || op == BinaryOp.Le || op == BinaryOp.Ge) {
+                return Expr.makeBoolLiteral(result != 0);
+            }
+            return Expr.makeIntegerLiteral(result);
+        }
+        // 浮点 + 浮点
+        if (left.kind == ExprKind.FloatLiteral && right.kind == ExprKind.FloatLiteral) {
+            double result = this.evalFloatBinop(op, left.doubleValue, right.doubleValue);
+            if (op == BinaryOp.Div && right.doubleValue == 0.0) return null;
+            if (op == BinaryOp.Add || op == BinaryOp.Sub || op == BinaryOp.Mul || op == BinaryOp.Div) {
+                return Expr.makeFloatLiteral(result);
+            }
+            return null;
+        }
+        // 布尔 + 布尔
+        if (left.kind == ExprKind.BoolLiteral && right.kind == ExprKind.BoolLiteral) {
+            if (op == BinaryOp.And) return Expr.makeBoolLiteral(left.boolValue && right.boolValue);
+            if (op == BinaryOp.Or) return Expr.makeBoolLiteral(left.boolValue || right.boolValue);
+            if (op == BinaryOp.Eq) return Expr.makeBoolLiteral(left.boolValue == right.boolValue);
+            if (op == BinaryOp.Ne) return Expr.makeBoolLiteral(left.boolValue != right.boolValue);
+            return null;
+        }
+        // null == null
+        if (left.kind == ExprKind.Null && right.kind == ExprKind.Null) {
+            if (op == BinaryOp.Eq) return Expr.makeBoolLiteral(true);
+            if (op == BinaryOp.Ne) return Expr.makeBoolLiteral(false);
+            return null;
+        }
+        // 字符串比较和拼接
+        if (left.kind == ExprKind.StringLiteral && right.kind == ExprKind.StringLiteral) {
+            if (op == BinaryOp.Eq) return Expr.makeBoolLiteral(left.strValue.equals(right.strValue));
+            if (op == BinaryOp.Ne) return Expr.makeBoolLiteral(!left.strValue.equals(right.strValue));
+            if (op == BinaryOp.Add) return Expr.makeStringLiteral(left.strValue + right.strValue);
+            return null;
+        }
+        // 代数化简：x + 0 → x, x * 1 → x
+        if (left.kind == ExprKind.IntegerLiteral && left.longValue == 0 && op == BinaryOp.Add) {
+            return this.cloneExpr(right);
+        }
+        if (left.kind == ExprKind.IntegerLiteral && left.longValue == 1 && op == BinaryOp.Mul) {
+            return this.cloneExpr(right);
+        }
+        if (right.kind == ExprKind.IntegerLiteral && right.longValue == 0 && op == BinaryOp.Add) {
+            return this.cloneExpr(left);
+        }
+        if (right.kind == ExprKind.IntegerLiteral && right.longValue == 1 && op == BinaryOp.Mul) {
+            return this.cloneExpr(left);
+        }
+        // 布尔化简：false && x → false, true || x → true
+        if (left.kind == ExprKind.BoolLiteral && !left.boolValue && op == BinaryOp.And) {
+            return Expr.makeBoolLiteral(false);
+        }
+        if (left.kind == ExprKind.BoolLiteral && left.boolValue && op == BinaryOp.Or) {
+            return Expr.makeBoolLiteral(true);
+        }
+        return null;
+    }
+
+    private Expr tryFoldUnary(int op, Expr operand) {
+        if (op == UnaryOp.Minus && operand.kind == ExprKind.IntegerLiteral) {
+            return Expr.makeIntegerLiteral(-operand.longValue);
+        }
+        if (op == UnaryOp.Minus && operand.kind == ExprKind.FloatLiteral) {
+            return Expr.makeFloatLiteral(-operand.doubleValue);
+        }
+        if (op == UnaryOp.Not && operand.kind == ExprKind.BoolLiteral) {
+            return Expr.makeBoolLiteral(!operand.boolValue);
+        }
+        if (op == UnaryOp.Not && operand.kind == ExprKind.IntegerLiteral) {
+            return Expr.makeIntegerLiteral(~operand.longValue);
+        }
+        if (op == UnaryOp.BitNot && operand.kind == ExprKind.IntegerLiteral) {
+            return Expr.makeIntegerLiteral(~operand.longValue);
+        }
+        return null;
+    }
+
+    // ---- 整数/浮点二元运算 ----
+
+    private long evalIntBinop(int op, long l, long r) {
+        if (op == BinaryOp.Add) return l + r;
+        if (op == BinaryOp.Sub) return l - r;
+        if (op == BinaryOp.Mul) return l * r;
+        if (op == BinaryOp.Div) return l / r;
+        if (op == BinaryOp.Mod) return l % r;
+        if (op == BinaryOp.Shl) return l << (int)r;
+        if (op == BinaryOp.Shr) return l >> (int)r;
+        if (op == BinaryOp.BitAnd) return l & r;
+        if (op == BinaryOp.BitOr) return l | r;
+        if (op == BinaryOp.BitXor) return l ^ r;
+        if (op == BinaryOp.Eq) return l == r ? 1 : 0;
+        if (op == BinaryOp.Ne) return l != r ? 1 : 0;
+        if (op == BinaryOp.Lt) return l < r ? 1 : 0;
+        if (op == BinaryOp.Gt) return l > r ? 1 : 0;
+        if (op == BinaryOp.Le) return l <= r ? 1 : 0;
+        if (op == BinaryOp.Ge) return l >= r ? 1 : 0;
+        return 0;
+    }
+
+    private double evalFloatBinop(int op, double l, double r) {
+        if (op == BinaryOp.Add) return l + r;
+        if (op == BinaryOp.Sub) return l - r;
+        if (op == BinaryOp.Mul) return l * r;
+        if (op == BinaryOp.Div) return l / r;
+        return 0.0;
+    }
+
+    // ---- 常量求值 ----
+
+    private ConstValue evalConst(Expr expr) {
+        if (expr == null) return null;
+        if (expr.kind == ExprKind.IntegerLiteral) return ConstValue.makeInt(expr.longValue);
+        if (expr.kind == ExprKind.FloatLiteral) return ConstValue.makeFloat(expr.doubleValue);
+        if (expr.kind == ExprKind.BoolLiteral) return ConstValue.makeBool(expr.boolValue);
+        if (expr.kind == ExprKind.Null) return ConstValue.makeNull();
+        return null;
+    }
+
+    // ---- 死代码判断 ----
+
+    private bool isDeadStmt(Stmt stmt) {
+        if (stmt.kind == StmtKind.Expr) {
+            return this.isPureExpr(stmt.expr);
+        }
+        if (stmt.kind == StmtKind.Block) {
+            return stmt.statements.size() == 0;
+        }
+        return false;
+    }
+
+    private bool isPureExpr(Expr expr) {
+        if (expr == null) return true;
+        if (expr.kind == ExprKind.IntegerLiteral || expr.kind == ExprKind.FloatLiteral ||
+            expr.kind == ExprKind.StringLiteral || expr.kind == ExprKind.CharLiteral ||
+            expr.kind == ExprKind.BoolLiteral || expr.kind == ExprKind.Null ||
+            expr.kind == ExprKind.This || expr.kind == ExprKind.Super ||
+            expr.kind == ExprKind.Variable) {
+            return true;
+        }
+        if (expr.kind == ExprKind.BinaryOp) {
+            return this.isPureExpr(expr.left) && this.isPureExpr(expr.right);
+        }
+        if (expr.kind == ExprKind.UnaryOp) {
+            return this.isPureExpr(expr.operand);
+        }
+        if (expr.kind == ExprKind.Ternary) {
+            return this.isPureExpr(expr.condition) && this.isPureExpr(expr.thenExpr) && this.isPureExpr(expr.elseExpr);
+        }
+        return false;
+    }
+
+    // ---- 赋值变量收集（用于常量环境失效） ----
+
+    private void invalidateAssignedVarsStmt(Stmt stmt) {
+        if (stmt.kind == StmtKind.Block) {
+            for (int i = 0; i < stmt.statements.size(); i++) {
+                this.invalidateAssignedVarsStmt(stmt.statements.get(i));
+            }
+        } else if (stmt.kind == StmtKind.If) {
+            this.invalidateAssignedVarsStmt(stmt.thenBranch);
+            if (stmt.elseBranch != null) {
+                this.invalidateAssignedVarsStmt(stmt.elseBranch);
+            }
+        } else if (stmt.kind == StmtKind.While) {
+            this.invalidateAssignedVarsStmt(stmt.body);
+        } else if (stmt.kind == StmtKind.For) {
+            this.invalidateAssignedVarsStmt(stmt.body);
+        } else if (stmt.kind == StmtKind.Expr) {
+            this.invalidateAssignedVarsExpr(stmt.expr);
+        } else if (stmt.kind == StmtKind.VarDecl) {
+            this.constantEnv.remove(stmt.varDecl.name);
+        } else if (stmt.kind == StmtKind.Try) {
+            for (int i = 0; i < stmt.tryBlock.statements.size(); i++) {
+                this.invalidateAssignedVarsStmt(stmt.tryBlock.statements.get(i));
+            }
+            for (int ci = 0; ci < stmt.catchClauses.size(); ci++) {
+                CatchClause catch_ = stmt.catchClauses.get(ci);
+                for (int i = 0; i < catch_.body.statements.size(); i++) {
+                    this.invalidateAssignedVarsStmt(catch_.body.statements.get(i));
+                }
+            }
+            if (stmt.finallyBlock != null) {
+                for (int i = 0; i < stmt.finallyBlock.statements.size(); i++) {
+                    this.invalidateAssignedVarsStmt(stmt.finallyBlock.statements.get(i));
+                }
+            }
+        } else if (stmt.kind == StmtKind.ForEach) {
+            this.invalidateAssignedVarsStmt(stmt.body);
+        } else if (stmt.kind == StmtKind.Switch) {
+            for (int ci = 0; ci < stmt.cases.size(); ci++) {
+                SwitchCase case_ = stmt.cases.get(ci);
+                for (int i = 0; i < case_.body.statements.size(); i++) {
+                    this.invalidateAssignedVarsStmt(case_.body.statements.get(i));
+                }
+            }
+            if (stmt.defaultBlock != null) {
+                for (int i = 0; i < stmt.defaultBlock.statements.size(); i++) {
+                    this.invalidateAssignedVarsStmt(stmt.defaultBlock.statements.get(i));
+                }
+            }
+        }
+    }
+
+    private void invalidateAssignedVarsExpr(Expr expr) {
+        if (expr == null) return;
+        if (expr.kind == ExprKind.Assignment) {
+            if (expr.target.kind == ExprKind.Variable) {
+                this.constantEnv.remove(expr.target.strValue);
+            }
+            this.invalidateAssignedVarsExpr(expr.value);
+        } else if (expr.kind == ExprKind.BinaryOp) {
+            this.invalidateAssignedVarsExpr(expr.left);
+            this.invalidateAssignedVarsExpr(expr.right);
+        } else if (expr.kind == ExprKind.UnaryOp) {
+            if (expr.opValue == UnaryOp.PreInc || expr.opValue == UnaryOp.PreDec ||
+                expr.opValue == UnaryOp.PostInc || expr.opValue == UnaryOp.PostDec) {
+                if (expr.operand.kind == ExprKind.Variable) {
+                    this.constantEnv.remove(expr.operand.strValue);
+                }
+            }
+            this.invalidateAssignedVarsExpr(expr.operand);
+        } else if (expr.kind == ExprKind.Call) {
+            this.invalidateAssignedVarsExpr(expr.callee);
+            for (int i = 0; i < expr.args.size(); i++) {
+                this.invalidateAssignedVarsExpr(expr.args.get(i));
+            }
+        } else if (expr.kind == ExprKind.MethodCall) {
+            this.invalidateAssignedVarsExpr(expr.receiver);
+            for (int i = 0; i < expr.args.size(); i++) {
+                this.invalidateAssignedVarsExpr(expr.args.get(i));
+            }
+        } else if (expr.kind == ExprKind.Ternary) {
+            this.invalidateAssignedVarsExpr(expr.condition);
+            this.invalidateAssignedVarsExpr(expr.thenExpr);
+            this.invalidateAssignedVarsExpr(expr.elseExpr);
+        }
+    }
+
+    // ---- 辅助方法：复制 Expr 字段 ----
+
+    private Expr cloneExpr(Expr src) {
+        if (src == null) return null;
+        Expr dst = new Expr(src.kind);
+        dst.longValue = src.longValue;
+        dst.doubleValue = src.doubleValue;
+        dst.strValue = src.strValue;
+        dst.charValue = src.charValue;
+        dst.boolValue = src.boolValue;
+        dst.opValue = src.opValue;
+        dst.left = src.left;
+        dst.right = src.right;
+        dst.operand = src.operand;
+        dst.target = src.target;
+        dst.value = src.value;
+        dst.callee = src.callee;
+        dst.args = src.args;
+        dst.receiver = src.receiver;
+        dst.index = src.index;
+        dst.typeArgs = src.typeArgs;
+        dst.castType = src.castType;
+        dst.typeRef = src.typeRef;
+        dst.lambdaParams = src.lambdaParams;
+        dst.lambdaBody = src.lambdaBody;
+        dst.condition = src.condition;
+        dst.thenExpr = src.thenExpr;
+        dst.elseExpr = src.elseExpr;
+        dst.matchExpr = src.matchExpr;
+        dst.matchArms = src.matchArms;
+        return dst;
+    }
+
+    private void copyExprFields(Expr dst, Expr src) {
+        if (src == null) return;
+        dst.kind = src.kind;
+        dst.longValue = src.longValue;
+        dst.doubleValue = src.doubleValue;
+        dst.strValue = src.strValue;
+        dst.charValue = src.charValue;
+        dst.boolValue = src.boolValue;
+        dst.opValue = src.opValue;
+        dst.left = src.left;
+        dst.right = src.right;
+        dst.operand = src.operand;
+        dst.target = src.target;
+        dst.value = src.value;
+        dst.callee = src.callee;
+        dst.args = src.args;
+        dst.receiver = src.receiver;
+        dst.index = src.index;
+        dst.typeArgs = src.typeArgs;
+        dst.castType = src.castType;
+        dst.typeRef = src.typeRef;
+        dst.lambdaParams = src.lambdaParams;
+        dst.lambdaBody = src.lambdaBody;
+        dst.condition = src.condition;
+        dst.thenExpr = src.thenExpr;
+        dst.elseExpr = src.elseExpr;
+        dst.matchExpr = src.matchExpr;
+        dst.matchArms = src.matchArms;
+    }
+
+    // ---- 辅助方法：复制 Stmt 字段 ----
+
+    private void copyStmtFields(Stmt dst, Stmt src) {
+        if (src == null) return;
+        dst.statements = src.statements;
+        dst.expr = src.expr;
+        dst.condition = src.condition;
+        dst.thenBranch = src.thenBranch;
+        dst.elseBranch = src.elseBranch;
+        dst.init = src.init;
+        dst.forCond = src.forCond;
+        dst.update = src.update;
+        dst.body = src.body;
+        dst.forEachType = src.forEachType;
+        dst.forEachVarName = src.forEachVarName;
+        dst.forEachIterable = src.forEachIterable;
+        dst.returnValue = src.returnValue;
+        dst.tryBlock = src.tryBlock;
+        dst.catchClauses = src.catchClauses;
+        dst.finallyBlock = src.finallyBlock;
+        dst.varDecl = src.varDecl;
+        dst.switchExpr = src.switchExpr;
+        dst.cases = src.cases;
+        dst.defaultBlock = src.defaultBlock;
+    }
+}
