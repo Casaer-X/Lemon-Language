@@ -15,6 +15,9 @@ vscode-lemon/
 *.asm
 *.out
 *.log
+build_t1/
+build_t2/
+build_t3/
 
 # Debug/temp files
 debug.gdb

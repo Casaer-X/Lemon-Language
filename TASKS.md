@@ -11,7 +11,7 @@
 | Lexer | ✅ 完成 | `lexer/` (5 文件) | 词法分析，60+ Token 类型 |
 | Parser | ✅ 完成 | `parser/` (5 文件) | 递归下降 + Pratt 表达式解析 |
 | Semantic | ✅ 完成 | `semantic/` (4 文件) | 类型检查、继承验证 |
-| CCodeGen | ⚠️ 95% | `codegen/CCodeGen.lm` (3791 行) | 缺默认参数值填充、泛型实例化 |
+| CCodeGen | ✅ 完成 | `codegen/CCodeGen.lm` (3791 行) | 默认参数、泛型实例化已完整 |
 | Optimizer | ✅ 完成 | `ast/Optimizer.lm` | 常量折叠/传播/死代码消除 |
 | IR/IRGen | ✅ 完成 | `ir/` (4 文件) | SSA IR 生成 |
 | Runtime | ✅ 完成 | `runtime/Runtime.lm` | 40+ 运行时函数注册 |
@@ -34,9 +34,9 @@
 
 | # | 任务 | 模块 | 说明 |
 |---|------|------|------|
-| P0-1 | CCodeGen 默认参数值填充 | `codegen/CCodeGen.lm` | 添加 `resolveMethodWithDefaults` 辅助方法，在 genObjMethodCall 的 4 个调用点接入 |
-| P0-2 | CCodeGen 泛型类实例化 | `codegen/CCodeGen.lm` | 移植 Rust 版的 `collect_generic_instances` 逻辑，生成具体类型 struct |
-| P0-3 | 自举验证 | 全量 | T0→T1→T2→T3 固定点验证通过 |
+| P0-1 | CCodeGen 默认参数值填充 | `codegen/CCodeGen.lm` | ✅ 已完成 — `resolve_method_with_defaults` 已接入 genObjMethodCall 4 个调用点 |
+| P0-2 | CCodeGen 泛型类实例化 | `codegen/CCodeGen.lm` | ✅ 已完成 — `collectGenericInstances` + `emit_generic_implementations` + 类型替换完整 |
+| P0-3 | 自举验证 | 全量 | ✅ 已完成 — T0→T1→T2→T3 固定点验证通过 (T2.c ≡ T3.c) |
 
 ### P1 — 原生代码生成链路
 
