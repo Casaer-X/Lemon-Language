@@ -26,6 +26,36 @@
 | ExecutionStrategy | ✅ 完成 | `ast/ExecutionStrategy.lm` | AOT/JIT 策略决策 |
 | LemonCompiler | ✅ 完成 | `LemonCompiler.lm` (478 行) | --build 模式、多目标分发 |
 
+### vscode-lemon — VS Code 扩展
+
+| 子模块 | 状态 | 说明 |
+|--------|------|------|
+| 语法高亮 | ✅ 完成 | TextMate 语法: 关键字/类型/操作符/注释/字符串/数字/注解 |
+| 语言配置 | ✅ 完成 | 行注释/块注释、括号匹配/自动闭合、缩进规则 |
+| 代码片段 | ✅ 完成 | 23 个模板: class/iface/enum/method/ctor/main/if/for/while/match/Array/Map |
+| LSP (Diagnostics) | ✅ 完成 | 通过 lemonc 输出解析诊断信息 |
+| LSP (Completion) | ✅ 完成 | 关键字补全 + 类型补全 |
+| LSP (Definition) | ✅ 完成 | Go to Definition |
+| LSP (Hover) | ✅ 完成 | 类型信息悬停 |
+| LSP (Symbols) | ✅ 完成 | 文档符号大纲 |
+| 命令 | ✅ 完成 | Run / Compile / CompileBytecode / BuildProject / CompileWithAnnotation |
+| 指南 | ✅ 完成 | GUIDE.md (v4.1.0 完整用户指南) |
+
+### Release — 发布
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| R-1 | ✅ 完成 | T1 自举构建 (539.5 KB, 固定点验证通过) |
+| R-2 | ✅ 完成 | release 目录 `lemonc-v4.1.0-windows-x86_64.exe` + SHA256 |
+| R-3 | ✅ 完成 | 构建脚本 `scripts/bootstrap.ps1` |
+| R-4 | ✅ 完成 | Rust T0 冻结 (FREEZE.md, 仅引导用途) |
+| R-5 | ✅ 完成 | CHANGELOG / TASKS / .gitignore / README 更新 |
+
+### 后续开发
+
+Lemon 版编译器 (lemonc_lm) 为**唯一活跃开发编译器**。所有新功能、优化、修复直接在 `.lm` 源码上进行。
+开发流程: `编辑 .lm → 自举验证 → 提交`
+
 ---
 
 ## 任务清单

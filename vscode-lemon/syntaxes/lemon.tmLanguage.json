@@ -1,0 +1,228 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Lemon",
+  "scopeName": "source.lemon",
+  "fileTypes": [".lm"],
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#chars"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#annotations"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    },
+    {
+      "include": "#identifiers"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.lemon",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "patterns": [
+            {
+              "include": "#comments"
+            }
+          ]
+        },
+        {
+          "name": "comment.line.double-slash.lemon",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.lemon",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.lemon",
+          "match": "\\\\[nrt\\\\\"'0]"
+        }
+      ]
+    },
+    "chars": {
+      "name": "string.quoted.single.lemon",
+      "match": "'([^'\\\\]|\\\\.)'"
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.lemon",
+          "match": "\\b\\d+\\.\\d+([eE][+-]?\\d+)?[fFdD]?\\b"
+        },
+        {
+          "name": "constant.numeric.float.lemon",
+          "match": "\\b\\d+[fFdD]\\b"
+        },
+        {
+          "name": "constant.numeric.hex.lemon",
+          "match": "\\b0[xX][0-9a-fA-F]+[lL]?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.lemon",
+          "match": "\\b\\d+[lL]?\\b"
+        }
+      ]
+    },
+    "annotations": {
+      "name": "storage.type.annotation.lemon",
+      "match": "@[a-zA-Z_][a-zA-Z0-9_]*"
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.lemon",
+          "match": "\\b(if|else|for|while|return|break|continue|try|catch|throw|finally|match|switch|case|default|in)\\b"
+        },
+        {
+          "name": "keyword.other.lemon",
+          "match": "\\b(package|import|extern|sizeof|typeid|new|delete|instanceof|as|enum)\\b"
+        },
+        {
+          "name": "storage.modifier.lemon",
+          "match": "\\b(public|private|static|final|abstract|virtual|override|reflectable)\\b"
+        },
+        {
+          "name": "storage.type.class.lemon",
+          "match": "\\b(class|interface|extends|implements)\\b"
+        },
+        {
+          "name": "variable.language.lemon",
+          "match": "\\b(this|super)\\b"
+        }
+      ]
+    },
+    "types": {
+      "name": "storage.type.primitive.lemon",
+      "match": "\\b(void|bool|byte|char|short|int|long|float|double|Array|Map|String)\\b"
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.lemon",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.null.lemon",
+          "match": "\\bnull\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.compound.lemon",
+          "match": "\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|<<=|>>="
+        },
+        {
+          "name": "keyword.operator.arithmetic.lemon",
+          "match": "\\+\\+|--"
+        },
+        {
+          "name": "keyword.operator.comparison.lemon",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.logical.lemon",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "name": "keyword.operator.bitwise.lemon",
+          "match": "&|\\||\\^|~"
+        },
+        {
+          "name": "keyword.operator.assignment.lemon",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.arithmetic.lemon",
+          "match": "\\+|\\-|\\*|/|%"
+        },
+        {
+          "name": "keyword.operator.other.lemon",
+          "match": "\\?\\?|<<|>>|->|=>"
+        },
+        {
+          "name": "keyword.operator.ternary.lemon",
+          "match": "\\?"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.terminator.lemon",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.lemon",
+          "match": ","
+        },
+        {
+          "name": "punctuation.accessor.lemon",
+          "match": "\\."
+        },
+        {
+          "name": "punctuation.section.scope.lemon",
+          "match": "[{}]"
+        },
+        {
+          "name": "punctuation.section.parens.lemon",
+          "match": "[()]"
+        },
+        {
+          "name": "punctuation.section.brackets.lemon",
+          "match": "[\\[\\]]"
+        },
+        {
+          "name": "punctuation.separator.colon.lemon",
+          "match": ":"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "entity.name.function.lemon",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()"
+        },
+        {
+          "name": "entity.name.type.class.lemon",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        },
+        {
+          "name": "variable.other.lemon",
+          "match": "\\b[a-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}

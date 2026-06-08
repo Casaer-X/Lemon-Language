@@ -1,12 +1,13 @@
 # Language Lemon - Self-hosting compiler source
 # https://github.com/Casaer-X/Language-Lemon
 
-# External sub-repos (not tracked here)
-lemonc/
-vscode-lemon/
+# ── Rust T0 (bootstrap only, frozen) ──
+lemonc/*
+!lemonc/FREEZE.md
 
-# Build artifacts
+# ── Build artifacts ──
 *.exe
+!release/**/*.exe
 *.o
 *.obj
 *.lmb
@@ -15,21 +16,28 @@ vscode-lemon/
 *.asm
 *.out
 *.log
-build_t1/
-build_t2/
-build_t3/
+build/
+build_t*/
 
-# Debug/temp files
+# ── Release (binaries tracked) ──
+!release/
+
+# ── VS Code extension ──
+vscode-lemon/node_modules/
+vscode-lemon/out/
+vscode-lemon/*.vsix
+
+# ── Debug/temp files ──
 debug.gdb
 *_err.txt
 *_out.txt
 
-# IDE files
+# ── IDE files ──
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# OS files
+# ── OS files ──
 .DS_Store
 Thumbs.db

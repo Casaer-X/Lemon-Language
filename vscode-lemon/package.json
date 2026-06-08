@@ -1,0 +1,71 @@
+{
+  "name": "vscode-lemon",
+  "displayName": "Language Lemon",
+  "description": "Language Lemon - A systems programming language with C-level control and Java-style OOP. Syntax highlighting, snippets, and language support.",
+  "version": "1.0.0",
+  "publisher": "Casaer-X",
+  "license": "MIT",
+  "icon": "images/lemon-icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Casaer-X/vscode-lemon"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "keywords": [
+    "lemon",
+    "language lemon",
+    "lemonc",
+    "compiler",
+    "systems programming"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "lemon",
+        "aliases": [
+          "Lemon",
+          "lemon"
+        ],
+        "extensions": [
+          ".lm"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "lemon",
+        "scopeName": "source.lemon",
+        "path": "./syntaxes/lemon.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "lemon",
+        "path": "./snippets/lemon.json"
+      }
+    ]
+  },
+  "activationEvents": [
+    "onLanguage:lemon"
+  ],
+  "main": "./out/extension.js",
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  }
+}
